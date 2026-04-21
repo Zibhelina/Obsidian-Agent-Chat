@@ -1049,17 +1049,25 @@ button.obsidian-agents-message-action-btn:hover {
 
 .obsidian-agents-composer-input-row {
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   gap: 6px;
   width: 100%;
   min-height: 44px;
 }
 
-/* Keep the attach/send buttons hugging the bottom of the rounded container
-   so they don't drift to the center as the textarea grows with shift+enter. */
+/* Single-line composer: everything centers. Multi-line composer
+   (shift+enter grows the editor): pin the attach/send buttons to the
+   bottom so they don't float mid-editor. The :has() check triggers on
+   any row whose editor content has wrapped to more than one line. */
 .obsidian-agents-composer-input-row > .obsidian-agents-composer-attach-btn,
 .obsidian-agents-composer-input-row > .obsidian-agents-composer-send-btn {
   flex-shrink: 0;
+}
+
+.obsidian-agents-composer-input-row:has(.cm-content > .cm-line ~ .cm-line)
+  > .obsidian-agents-composer-attach-btn,
+.obsidian-agents-composer-input-row:has(.cm-content > .cm-line ~ .cm-line)
+  > .obsidian-agents-composer-send-btn {
   align-self: flex-end;
   margin-bottom: 4px;
 }
@@ -1070,8 +1078,8 @@ button.obsidian-agents-message-action-btn:hover {
 .obsidian-agents-composer-expand-btn,
 button.obsidian-agents-composer-expand-btn {
   position: absolute;
-  top: -11px;
-  right: -11px;
+  top: -3px;
+  right: -3px;
   z-index: 5;
   display: inline-flex;
   align-items: center;
