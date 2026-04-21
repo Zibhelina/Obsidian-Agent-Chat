@@ -187,15 +187,15 @@ interface TermsSpec {
 // Scoped to `window` so every view in the workspace shares definitions.
 declare global {
   interface Window {
-    __obsidian-agentsTerms?: Map<string, TermDefinition>;
+    __obsidianAgentsTerms?: Map<string, TermDefinition>;
   }
 }
 
 function getTermRegistry(): Map<string, TermDefinition> {
-  if (!window.__obsidian-agentsTerms) {
-    window.__obsidian-agentsTerms = new Map();
+  if (!window.__obsidianAgentsTerms) {
+    window.__obsidianAgentsTerms = new Map();
   }
-  return window.__obsidian-agentsTerms;
+  return window.__obsidianAgentsTerms;
 }
 
 export function registerTerm(def: TermDefinition): void {
