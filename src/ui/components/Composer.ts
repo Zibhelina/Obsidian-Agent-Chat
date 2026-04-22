@@ -403,7 +403,21 @@ export class Composer extends Component {
 
   private autoResize(): void {
     const value = this.editor.getValue();
-    const multiLine = value.includes("\n");
+    const hasNewline = value.includes("\n");
+    // Detect visual wrapping too — a long single line that wraps past the
+    // editor width should also exit compact mode, otherwise the +/send
+    // buttons stay stuck on the first line alongside wrapped text.
+    const cmLines = this.containerEl.querySelectorAll(
+      ".obsidian-agents-composer-cm .cm-line"
+    );
+    let visuallyWrapped = cmLines.length > 1;
+    if (!visuallyWrapped && cmLines.length === 1) {
+      const line = cmLines[0] as HTMLElement;
+      const cs = window.getComputedStyle(line);
+      const lineHeight = parseFloat(cs.lineHeight || "0") || line.clientHeight;
+      visuallyWrapped = lineHeight > 0 && line.clientHeight > lineHeight * 1.5;
+    }
+    const multiLine = hasNewline || visuallyWrapped;
     const showExpand =
       this.expanded || multiLine || value.length >= EXPAND_THRESHOLD;
     this.expandBtn.style.display = showExpand ? "inline-flex" : "none";
