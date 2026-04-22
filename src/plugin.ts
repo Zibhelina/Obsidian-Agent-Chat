@@ -245,6 +245,13 @@ export default class ObsidianAgentsPlugin extends Plugin {
     const data = await loadSessions(this.app);
     this.sessions = data.sessions;
     this.foldersList = data.folders;
+    // Migrate: any pre-existing session from before the lastReadAt field
+    // existed is treated as already-read up to its latest activity. Without
+    // this, every historical chat would light up with the unread dot on
+    // first launch of a build that has this feature.
+    for (const s of this.sessions) {
+      if (s.lastReadAt == null) s.lastReadAt = s.updatedAt;
+    }
   }
 
   async saveSessionsData(): Promise<void> {
@@ -403,7 +410,10 @@ export default class ObsidianAgentsPlugin extends Plugin {
     if (sessionId === this.activeSessionId) return false;
     const session = this.sessions.find((s) => s.id === sessionId);
     if (!session) return false;
-    const readCursor = session.lastReadAt ?? session.createdAt;
+    // Missing lastReadAt → treat as read up to the session's latest activity,
+    // so sessions that existed before this feature shipped don't all show
+    // an unread dot.
+    const readCursor = session.lastReadAt ?? session.updatedAt;
     const latestAgent = session.messages
       .filter((m) => m.role === "agent")
       .reduce((acc, m) => Math.max(acc, m.timestamp), 0);

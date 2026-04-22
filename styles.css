@@ -3922,15 +3922,18 @@ button.obsidian-agents-tree-item-menu {
 }
 
 /* Session row indicators — unread dot / streaming spinner.
-   Sits between the label and the overflow menu; the menu still hides on
-   hover per the existing rules, so the indicator takes its slot without
-   overlapping. */
+   Positioned absolutely at the right edge so the empty space left by the
+   (hidden) overflow menu doesn't push the indicator away from the sidebar
+   edge. The menu button reveals on row hover and the indicator hides via
+   the rule below. */
 .obsidian-agents-session-indicator {
-  flex: 0 0 auto;
+  position: absolute;
+  right: 8px;
+  top: calc(50% - 5px);
   width: 10px;
   height: 10px;
-  margin-right: 2px;
-  display: inline-block;
+  flex: 0 0 auto;
+  box-sizing: border-box;
 }
 
 .obsidian-agents-session-unread-dot {
@@ -3940,9 +3943,8 @@ button.obsidian-agents-tree-item-menu {
 
 .obsidian-agents-session-spinner {
   border-radius: 50%;
-  border: 2px solid color-mix(in srgb, var(--interactive-accent) 25%, transparent);
+  border: 1.5px solid color-mix(in srgb, var(--interactive-accent) 25%, transparent);
   border-top-color: var(--interactive-accent);
-  box-sizing: border-box;
   animation: obsidian-agents-spin 0.85s linear infinite;
 }
 
