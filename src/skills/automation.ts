@@ -14,6 +14,8 @@ This skill exists specifically to make scheduled jobs reply back into the Obsidi
 
 ### The callback HTTP contract (copy this verbatim into the scheduled job)
 
+Single-channel form:
+
 \`\`\`
 POST <OBSIDIAN_AGENTS_CALLBACK_URL>
 Authorization: Bearer <OBSIDIAN_AGENTS_CALLBACK_TOKEN>
@@ -29,7 +31,39 @@ Content-Type: application/json
 }
 \`\`\`
 
-The plugin responds with \`200 { ok: true }\` on success. A 4xx/5xx means the job should log the error — do not retry silently in a tight loop.
+Multi-channel fan-out (one POST, multiple destinations — use this whenever the user asks the job to do more than one thing, e.g. "write a file and then tell me in a new chat"):
+
+\`\`\`
+POST <OBSIDIAN_AGENTS_CALLBACK_URL>
+Authorization: Bearer <OBSIDIAN_AGENTS_CALLBACK_TOKEN>
+Content-Type: application/json
+
+{
+  "deliveries": [
+    {
+      "channel": "note",
+      "target": "Notes/Task-X.md",
+      "payload": { "content": "...file contents..." }
+    },
+    {
+      "channel": "new-chat",
+      "payload": { "title": "Task X summary", "content": "...summary..." }
+    },
+    {
+      "channel": "notice",
+      "payload": { "content": "Task X done." }
+    }
+  ]
+}
+\`\`\`
+
+Each entry is independent — different channels, different payloads, different titles. Use the array form liberally: if the user asks for a message AND a file AND a toast, do all three in one POST rather than picking one. You have maximum control over what the user sees and where.
+
+The plugin responds:
+- Single form → \`200 { ok: true, channel }\` on success, or \`4xx/5xx { error }\`.
+- Batch form → \`200 { ok: true, results: [...] }\` if all succeeded, \`207 { ok: false, results: [...] }\` if some failed. Each result is \`{ channel, ok: true }\` or \`{ channel, ok: false, error }\`. A 4xx means the whole batch was rejected before any delivery ran (bad shape or unknown channel name).
+
+Do not retry silently in a tight loop on failure — log and stop.
 
 ## Channel selection — default to \`chat\`, not \`notice\`
 
@@ -50,6 +84,12 @@ Examples (explicit routing):
 - "In 5 minutes, open a new chat and summarize today's news" → \`channel: "new-chat"\`.
 - "Every morning at 8am, append a daily digest to Notes/Digest.md" → \`channel: "note"\`, \`target: "Notes/Digest.md"\`.
 - "Ping me with a toast when the build is done" → \`channel: "notice"\`.
+
+Examples (multi-channel fan-out — use the \`deliveries\` array):
+
+- "In 1 min send me a message about task X, then create Y.md and send me the summary in a new chat" → one POST with three entries: \`{ channel: "chat", sessionId, payload: { content: "...msg about task X..." } }\`, \`{ channel: "note", target: "Y.md", payload: { content: "..." } }\`, \`{ channel: "new-chat", payload: { title: "Task X summary", content: "..." } }\`.
+- "Write the report to Report.md and ping me with a toast when done" → \`deliveries\`: note + notice.
+- "Post the result here and also save a copy to Archive/2026-04-21.md" → \`deliveries\`: chat + note (same or different content — your call, based on what the user asked for).
 
 ## Scheduling sub-minute delays
 

@@ -58,6 +58,21 @@ function isValidDeliveryRequest(v: unknown): v is DeliveryRequest {
   return typeof p.content === "string";
 }
 
+// Accept either a single delivery or a batch. Returns the list of deliveries
+// or null if the shape is invalid. The batch form lets a scheduled job fan out
+// the result to multiple channels in one POST — e.g. write to a note AND post
+// a summary in a new chat — without needing multiple round-trips.
+function extractDeliveries(parsed: unknown): DeliveryRequest[] | null {
+  if (isValidDeliveryRequest(parsed)) return [parsed];
+  if (parsed && typeof parsed === "object") {
+    const arr = (parsed as Record<string, unknown>).deliveries;
+    if (Array.isArray(arr) && arr.length > 0 && arr.every(isValidDeliveryRequest)) {
+      return arr as DeliveryRequest[];
+    }
+  }
+  return null;
+}
+
 export async function startCallbackServer(
   opts: CallbackServerOptions
 ): Promise<CallbackServer> {
@@ -105,33 +120,57 @@ export async function startCallbackServer(
       return;
     }
 
-    if (!isValidDeliveryRequest(parsed)) {
+    const deliveries = extractDeliveries(parsed);
+    if (!deliveries) {
       json(res, 400, {
         error:
-          "Expected { channel, sessionId?, target?, payload: { content, title?, metadata? } }",
+          "Expected { channel, sessionId?, target?, payload: { content, title?, metadata? } } OR { deliveries: [ ...same shape... ] }",
       });
       return;
     }
 
-    const channel = opts.registry.get(parsed.channel);
-    if (!channel) {
-      json(res, 400, {
-        error: `Unknown channel "${parsed.channel}". Available: ${opts.registry
-          .list()
-          .map((c) => c.id)
-          .join(", ")}`,
-      });
+    // Validate all channel names up-front so a typo in one entry doesn't leave
+    // the others half-delivered with no way to retry cleanly.
+    for (const d of deliveries) {
+      if (!opts.registry.get(d.channel)) {
+        json(res, 400, {
+          error: `Unknown channel "${d.channel}". Available: ${opts.registry
+            .list()
+            .map((c) => c.id)
+            .join(", ")}`,
+        });
+        return;
+      }
+    }
+
+    // Deliver sequentially. The per-entry result list lets the caller see
+    // partial success — e.g. the note write succeeded but the new-chat
+    // creation threw — without one failure aborting the rest.
+    const results: Array<
+      { channel: string; ok: true } | { channel: string; ok: false; error: string }
+    > = [];
+    let anyFailed = false;
+    for (const d of deliveries) {
+      const channel = opts.registry.get(d.channel)!;
+      try {
+        await channel.deliver(opts.context, d);
+        results.push({ channel: d.channel, ok: true });
+      } catch (err) {
+        anyFailed = true;
+        const msg = err instanceof Error ? err.message : String(err);
+        opts.onError?.(err instanceof Error ? err : new Error(msg));
+        results.push({ channel: d.channel, ok: false, error: msg });
+      }
+    }
+
+    if (deliveries.length === 1) {
+      const only = results[0];
+      if (only.ok) json(res, 200, { ok: true, channel: only.channel });
+      else json(res, 500, { error: only.error });
       return;
     }
 
-    try {
-      await channel.deliver(opts.context, parsed);
-      json(res, 200, { ok: true, channel: parsed.channel });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      opts.onError?.(err instanceof Error ? err : new Error(msg));
-      json(res, 500, { error: msg });
-    }
+    json(res, anyFailed ? 207 : 200, { ok: !anyFailed, results });
   });
 
   server.on("error", (err) => opts.onError?.(err));

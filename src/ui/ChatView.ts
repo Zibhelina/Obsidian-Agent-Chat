@@ -218,15 +218,18 @@ export class ChatView extends ItemView {
   }
 
   private updateEmptyState(session: ChatSession): void {
-    const hasUserMsg = session.messages.some((m) => m.role === "user");
+    // A scheduled/delivered agent message counts as "not empty" too — otherwise
+    // a new chat created from a callback delivery still shows the greeting and
+    // the centered composer.
+    const isEmpty = session.messages.length === 0;
     const panel = this.containerEl.querySelector(
       ".obsidian-agents-chat-panel"
     ) as HTMLElement | null;
     if (!panel) return;
-    panel.classList.toggle("obsidian-agents-empty", !hasUserMsg);
+    panel.classList.toggle("obsidian-agents-empty", isEmpty);
 
     let greeting = panel.querySelector(".obsidian-agents-greeting") as HTMLElement | null;
-    if (!hasUserMsg) {
+    if (isEmpty) {
       if (!greeting) {
         greeting = document.createElement("div");
         greeting.className = "obsidian-agents-greeting";
