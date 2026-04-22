@@ -1049,7 +1049,6 @@ button.obsidian-agents-message-action-btn:hover {
    difference from the expanded layout is height/padding, never width. */
 .obsidian-agents-composer.obsidian-agents-composer-compact
   > .obsidian-agents-composer-input-wrap {
-  padding: 8px 10px 8px 10px;
   min-height: 52px;
 }
 
@@ -1060,18 +1059,17 @@ button.obsidian-agents-message-action-btn:hover {
   gap: 4px;
   background: var(--background-secondary);
   border: 1px solid var(--background-modifier-border);
-  /* Hold a single 28px radius across every state — at the heights this
-     composer lives at (52-90px) 28px reads as fully rounded when
-     compact and as a soft curve when taller, with no interpolation
-     discontinuity. */
+  /* Hold a single 28px radius — at the heights this composer lives at
+     (52-90px) 28px reads as fully rounded when compact and as a soft
+     curve when taller, with no interpolation discontinuity. */
   border-radius: 28px;
-  padding: 6px 8px 6px 8px;
-  /* Single unified easing — only padding and min-height animate, both
-     on the same curve + duration so the change reads as one motion
-     rather than staggered parallel tracks. */
+  /* Padding is held constant across compact/expanded so nothing shifts
+     horizontally; only min-height animates, and on a plain ease-out so
+     it reads as a gentle settle rather than a spring. */
+  padding: 8px 10px;
+  min-height: 52px;
   transition: border-color 0.15s, box-shadow 0.15s,
-    padding 0.34s cubic-bezier(0.33, 0, 0.15, 1),
-    min-height 0.34s cubic-bezier(0.33, 0, 0.15, 1);
+    min-height 0.2s ease-out;
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.06);
 }
 
@@ -1083,8 +1081,8 @@ button.obsidian-agents-message-action-btn:hover {
   overflow: hidden;
   max-width: 100%;
   opacity: 1;
-  transition: max-width 0.34s cubic-bezier(0.33, 0, 0.15, 1),
-    opacity 0.28s ease-out, margin 0.34s cubic-bezier(0.33, 0, 0.15, 1);
+  transition: max-width 0.2s ease-out, opacity 0.2s ease-out,
+    margin 0.2s ease-out;
 }
 
 .obsidian-agents-composer-skill-chips-empty {
