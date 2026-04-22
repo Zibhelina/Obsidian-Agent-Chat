@@ -1,7 +1,8 @@
 import { App, Component, setIcon } from "obsidian";
 import { Attachment, MentionItem } from "../../types";
 import { MentionPopover, TextInputLike } from "./MentionPopover";
-import { filterCommands } from "../../features/commands";
+import { getSkillRegistry } from "../../features/commands";
+import type { Skill } from "../../skills";
 import { generateId } from "../../lib/id";
 import { LivePreviewEditor } from "./LivePreviewEditor";
 
@@ -24,15 +25,18 @@ export class Composer extends Component {
   private attachments: Attachment[] = [];
   private mentions: MentionItem[] = [];
   private replyQuote: string | null = null;
-  private onSend: (text: string, attachments: Attachment[]) => void;
+  private onSend: (text: string, attachments: Attachment[], skillId?: string | null) => void;
   private onAbort: (() => void) | null = null;
   private streaming = false;
   private mentionPopover: MentionPopover | null = null;
   private commandPopoverEl: HTMLElement | null = null;
   private commandQuery = "";
   private commandStartIndex = -1;
-  private commandItems: string[] = [];
+  private commandItems: Skill[] = [];
   private commandSelectedIndex = 0;
+  private activeSkill: Skill | null = null;
+  private skillPillEl: HTMLElement | null = null;
+  private skills = getSkillRegistry();
   private sendBtn: HTMLButtonElement;
   private expandBtn: HTMLButtonElement;
   private expanded = false;
@@ -44,7 +48,7 @@ export class Composer extends Component {
 
   constructor(
     container: HTMLElement,
-    onSend: (text: string, attachments: Attachment[]) => void,
+    onSend: (text: string, attachments: Attachment[], skillId?: string | null) => void,
     onAbort?: () => void
   ) {
     super();
@@ -82,6 +86,11 @@ export class Composer extends Component {
       };
       input.click();
     });
+
+    // Skill pill slot — an inline highlighted label rendered before the
+    // editor when the user invokes a slash command. Empty by default.
+    this.skillPillEl = inputRow.createDiv({ cls: "obsidian-agents-composer-skill-pill-slot" });
+    this.skillPillEl.style.display = "none";
 
     const editorHost = inputRow.createDiv({ cls: "obsidian-agents-composer-editor-host" });
     this.editor = new LivePreviewEditor(editorHost, {
@@ -207,13 +216,22 @@ export class Composer extends Component {
     for (const fn of this.keydownListeners) fn(evt);
     if (evt.defaultPrevented) return true;
 
-    if (evt.key === "Backspace" && this.mentions.length > 0) {
+    if (evt.key === "Backspace") {
       const cursor = this.editor.getCursor();
       const sel = this.editor.getSelectionRange();
-      if (cursor === 0 && sel.from === 0 && sel.to === 0) {
-        this.mentions.pop();
-        this.renderChips();
-        return true;
+      const atStart = cursor === 0 && sel.from === 0 && sel.to === 0;
+      if (atStart) {
+        // Backspace at position 0 peels off items in visual order:
+        // mention chips first (right of pill), then the skill pill.
+        if (this.mentions.length > 0) {
+          this.mentions.pop();
+          this.renderChips();
+          return true;
+        }
+        if (this.activeSkill) {
+          this.clearSkill();
+          return true;
+        }
       }
     }
     return false;
@@ -367,18 +385,24 @@ export class Composer extends Component {
   }
 
   private handleInput(): void {
+    // One skill at a time — don't try to stack commands. If a skill is
+    // already active, typing "/" just enters literal text.
+    if (this.activeSkill) {
+      this.hideCommandPopover();
+      return;
+    }
+
     const cursor = this.editor.getCursor();
     const text = this.editor.getValue();
     const beforeCursor = text.slice(0, cursor);
 
-    const lastNewline = beforeCursor.lastIndexOf("\n");
-    const lineStart = lastNewline === -1 ? 0 : lastNewline + 1;
-    const lineText = beforeCursor.slice(lineStart);
-
-    if (lineText.startsWith("/") && !lineText.includes(" ")) {
-      this.commandQuery = lineText.slice(1);
-      this.commandStartIndex = lineStart;
-      this.commandItems = filterCommands(this.commandQuery);
+    // Only trigger at the very start of the composer (position 0) — matches
+    // the screenshot UX where the slash command becomes a pill at the head
+    // of the input, not mid-sentence.
+    if (beforeCursor.startsWith("/") && !beforeCursor.includes(" ") && !beforeCursor.includes("\n")) {
+      this.commandQuery = beforeCursor.slice(1);
+      this.commandStartIndex = 0;
+      this.commandItems = this.skills.filter(this.commandQuery);
       this.commandSelectedIndex = 0;
       this.showCommandPopover();
     } else {
@@ -409,9 +433,14 @@ export class Composer extends Component {
 
     this.commandPopoverEl.style.display = "block";
     for (let i = 0; i < this.commandItems.length; i++) {
-      const cmd = this.commandItems[i];
+      const skill = this.commandItems[i];
       const row = this.commandPopoverEl.createDiv({ cls: "obsidian-agents-command-item" });
-      row.setText(cmd);
+
+      const main = row.createDiv({ cls: "obsidian-agents-command-item-main" });
+      main.createSpan({ cls: "obsidian-agents-command-item-id", text: skill.id });
+      main.createSpan({ cls: "obsidian-agents-command-item-label", text: skill.label });
+      row.createDiv({ cls: "obsidian-agents-command-item-desc", text: skill.description });
+
       if (i === this.commandSelectedIndex) {
         row.addClass("selected");
       }
@@ -424,15 +453,21 @@ export class Composer extends Component {
       });
       row.addEventListener("mousedown", (e) => {
         e.preventDefault();
-        this.selectCommand(cmd);
+        this.selectCommand(skill);
       });
     }
   }
 
-  private selectCommand(cmd: string): void {
-    if (this.commandStartIndex < 0) return;
-    const cursor = this.editor.getCursor();
-    this.editor.replaceRange(this.commandStartIndex, cursor, cmd + " ");
+  private selectCommand(skill: Skill): void {
+    // Strip the typed "/query" from the editor and promote the skill into a
+    // visual pill at the start of the composer. The user's prompt text now
+    // starts on a clean slate.
+    if (this.commandStartIndex >= 0) {
+      const cursor = this.editor.getCursor();
+      this.editor.replaceRange(this.commandStartIndex, cursor, "");
+    }
+    this.activeSkill = skill;
+    this.renderSkillPill();
     this.editor.focus();
     this.hideCommandPopover();
     this.updateSendButton();
@@ -444,6 +479,36 @@ export class Composer extends Component {
     }
     this.commandQuery = "";
     this.commandItems = [];
+  }
+
+  private renderSkillPill(): void {
+    if (!this.skillPillEl) return;
+    this.skillPillEl.empty();
+
+    if (!this.activeSkill) {
+      this.skillPillEl.style.display = "none";
+      return;
+    }
+
+    this.skillPillEl.style.display = "inline-flex";
+    const pill = this.skillPillEl.createSpan({
+      cls: "obsidian-agents-composer-skill-pill",
+      attr: { title: this.activeSkill.description },
+    });
+    pill.createSpan({
+      cls: "obsidian-agents-composer-skill-pill-slash",
+      text: "/",
+    });
+    pill.createSpan({
+      cls: "obsidian-agents-composer-skill-pill-name",
+      text: this.activeSkill.id.slice(1),
+    });
+  }
+
+  private clearSkill(): void {
+    this.activeSkill = null;
+    this.renderSkillPill();
+    this.updateSendButton();
   }
 
   private handleFile(file: File): void {
@@ -560,14 +625,17 @@ export class Composer extends Component {
       : text;
     const fullText = `${quotePrefix}${bodyText}`;
 
-    this.onSend(fullText, [...this.attachments]);
+    const skillId = this.activeSkill?.id ?? null;
+    this.onSend(fullText, [...this.attachments], skillId);
     this.editor.setValue("");
     this.attachments = [];
     this.mentions = [];
     this.replyQuote = null;
+    this.activeSkill = null;
     this.renderAttachments();
     this.renderChips();
     this.renderQuote();
+    this.renderSkillPill();
     this.hideCommandPopover();
     this.updateSendButton();
     if (this.expanded) this.setExpanded(false);

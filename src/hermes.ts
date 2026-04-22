@@ -7,6 +7,7 @@ import * as http from "http";
 import * as https from "https";
 import { URL } from "url";
 import { generateId } from "./lib/id";
+import { SkillRegistry } from "./skills";
 
 const HERMES_ENV_PATH = join(homedir(), ".hermes", ".env");
 
@@ -171,13 +172,44 @@ function buildMessageContent(msg: ChatMessage): string | ContentPart[] {
   return parts;
 }
 
+export interface RuntimeContext {
+  sessionId: string | null;
+  callbackUrl: string | null;
+  callbackToken: string | null;
+  // When set, the matching skill's prompt is appended to the system message
+  // and the callback runtime fields are only emitted if the skill needs them.
+  skillId?: string | null;
+}
+
+function buildRuntimeContextBlock(ctx: RuntimeContext): string | null {
+  const lines: string[] = [];
+  if (ctx.sessionId) lines.push(`OBSIDIAN_AGENTS_SESSION_ID=${ctx.sessionId}`);
+  if (ctx.callbackUrl) lines.push(`OBSIDIAN_AGENTS_CALLBACK_URL=${ctx.callbackUrl}/callback`);
+  if (ctx.callbackToken) lines.push(`OBSIDIAN_AGENTS_CALLBACK_TOKEN=${ctx.callbackToken}`);
+  if (lines.length === 0) return null;
+  return `\n\n## Runtime context\n\n\`\`\`\n${lines.join("\n")}\n\`\`\``;
+}
+
 function buildMessages(
-  history: ChatMessage[]
+  history: ChatMessage[],
+  runtime?: RuntimeContext,
+  registry?: SkillRegistry
 ): Array<{ role: string; content: string | ContentPart[] }> {
   const withSystem: Array<{ role: string; content: string | ContentPart[] }> = [];
   const hasSystem = history.some((m) => m.role === "system");
   if (!hasSystem) {
-    withSystem.push({ role: "system", content: OBSIDIAN_AGENTS_SYSTEM_PROMPT });
+    let prompt = OBSIDIAN_AGENTS_SYSTEM_PROMPT;
+    const skill = runtime?.skillId ? registry?.get(runtime.skillId) : undefined;
+    if (skill) {
+      prompt += `\n\n${skill.systemPrompt}`;
+    }
+    // Only attach the callback runtime block when the active skill needs it.
+    // Keeps the per-turn prompt tight when no skill is selected.
+    if (skill?.injectCallbackContext && runtime) {
+      const runtimeBlock = buildRuntimeContextBlock(runtime);
+      if (runtimeBlock) prompt += runtimeBlock;
+    }
+    withSystem.push({ role: "system", content: prompt });
   }
   for (const msg of history) {
     withSystem.push({
@@ -330,15 +362,18 @@ class ThinkingStripper {
 
 export class HermesInterface {
   private settings: ObsidianAgentsSettings;
+  private skills: SkillRegistry;
 
-  constructor(settings: ObsidianAgentsSettings) {
+  constructor(settings: ObsidianAgentsSettings, skills: SkillRegistry = new SkillRegistry()) {
     this.settings = settings;
+    this.skills = skills;
   }
 
   async sendMessage(
     messages: ChatMessage[],
     handlers: StreamHandlers,
-    abortController?: AbortController
+    abortController?: AbortController,
+    runtime?: RuntimeContext
   ): Promise<void> {
     const controller = abortController ?? new AbortController();
     const signal = controller.signal;
@@ -356,7 +391,7 @@ export class HermesInterface {
     }
 
     const body: Record<string, unknown> = {
-      messages: buildMessages(messages),
+      messages: buildMessages(messages, runtime, this.skills),
       stream: true,
     };
 

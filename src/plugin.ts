@@ -29,6 +29,10 @@ import { ChatView, CHAT_VIEW_TYPE } from "./ui/ChatView";
 import { HermesInterface } from "./hermes";
 import { resolveMentions, injectContextIntoMessage } from "./features/mentions";
 import { generateId } from "./lib/id";
+import { ChannelRegistry } from "./callback/channels";
+import type { DeliveryContext } from "./callback/channels/types";
+import { startCallbackServer, type CallbackServer } from "./callback/server";
+import type { DeliveryPayload } from "./types";
 
 export default class ObsidianAgentsPlugin extends Plugin {
   settings: ObsidianAgentsSettings;
@@ -47,6 +51,8 @@ export default class ObsidianAgentsPlugin extends Plugin {
     string,
     { messageId: string; abort: AbortController; startTime: number }
   >();
+  private channelRegistry = new ChannelRegistry();
+  private callbackServer: CallbackServer | null = null;
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -83,6 +89,8 @@ export default class ObsidianAgentsPlugin extends Plugin {
 
     this.addSettingTab(new ObsidianAgentsSettingTab(this.app, this));
 
+    await this.startCallbackServerIfEnabled();
+
     if (this.sessions.length === 0) {
       const session = createSession(null);
       session.name = "New Chat";
@@ -107,6 +115,107 @@ export default class ObsidianAgentsPlugin extends Plugin {
 
   onunload(): void {
     this.chatView = null;
+    // Stop the callback server on unload. Obsidian will unload us on reload
+    // and plugin-disable, so leaving the socket open leaks a port.
+    if (this.callbackServer) {
+      this.callbackServer.stop().catch(() => {});
+      this.callbackServer = null;
+    }
+  }
+
+  // --- Callback server --------------------------------------------------
+
+  private buildDeliveryContext(): DeliveryContext {
+    return {
+      app: this.app,
+      getSession: (id) => this.getSession(id),
+      appendAgentMessage: (sessionId, payload) => {
+        this.deliverToSession(sessionId, payload);
+      },
+      createSessionWithMessage: (name, payload) => {
+        const s = createSession(null);
+        s.name = name || s.name;
+        this.sessions.push(s);
+        this.deliverToSession(s.id, payload);
+        this.chatView?.renderSidebar(this.sessions, this.foldersList, this.activeSessionId);
+        return s;
+      },
+    };
+  }
+
+  private deliverToSession(sessionId: string, payload: DeliveryPayload): void {
+    const session = this.getSession(sessionId);
+    if (!session) return;
+
+    const agentMsg: ChatMessage = {
+      id: generateId(),
+      role: "agent",
+      content: payload.content,
+      attachments: [],
+      timestamp: Date.now(),
+      metadata: payload.metadata
+        ? { // Surface the scheduling metadata so the user can see what fired.
+            ...(payload.title ? { model: `(delivered) ${payload.title}` } : {}),
+          }
+        : undefined,
+    };
+    session.messages.push(agentMsg);
+    session.updatedAt = Date.now();
+    this.saveSessionsData();
+
+    // If the delivered-to session is the one currently open, rerender.
+    if (this.activeSessionId === sessionId) {
+      this.chatView?.loadSession(session);
+    } else {
+      this.chatView?.renderSidebar(this.sessions, this.foldersList, this.activeSessionId);
+    }
+  }
+
+  private async startCallbackServerIfEnabled(): Promise<void> {
+    if (!this.settings.callbackEnabled) return;
+
+    // Auto-generate a token on first run so out-of-the-box use is secure.
+    if (!this.settings.callbackToken) {
+      this.settings.callbackToken = generateId() + generateId();
+      await this.savePluginSettings();
+    }
+
+    try {
+      this.callbackServer = await startCallbackServer({
+        host: this.settings.callbackHost || "127.0.0.1",
+        port: this.settings.callbackPort || 0,
+        token: this.settings.callbackToken,
+        registry: this.channelRegistry,
+        context: this.buildDeliveryContext(),
+        onError: (err) => {
+          // Non-fatal — log and keep the plugin usable.
+          console.error("[obsidian-agents] callback server error", err);
+        },
+      });
+    } catch (err) {
+      console.error("[obsidian-agents] failed to start callback server", err);
+      new Notice(
+        `Obsidian Agents: callback server failed to start (${
+          err instanceof Error ? err.message : String(err)
+        }). Scheduled jobs won't be able to reply back until this is fixed in settings.`
+      );
+    }
+  }
+
+  async restartCallbackServer(): Promise<void> {
+    if (this.callbackServer) {
+      await this.callbackServer.stop();
+      this.callbackServer = null;
+    }
+    await this.startCallbackServerIfEnabled();
+  }
+
+  getCallbackUrl(): string | null {
+    return this.callbackServer?.url() ?? null;
+  }
+
+  getCallbackToken(): string {
+    return this.settings.callbackToken;
   }
 
   async activateView(): Promise<void> {
@@ -298,7 +407,8 @@ export default class ObsidianAgentsPlugin extends Plugin {
     sessionId: string,
     text: string,
     attachments: Attachment[],
-    handlers: StreamHandlers
+    handlers: StreamHandlers,
+    skillId: string | null = null
   ): Promise<string | null> {
     const session = this.getSession(sessionId);
     if (!session) return null;
@@ -311,6 +421,7 @@ export default class ObsidianAgentsPlugin extends Plugin {
       content: text,
       attachments,
       timestamp: Date.now(),
+      skillId: skillId ?? undefined,
     };
 
     // Resolve @mentions → build an API-only version with file bodies injected.
@@ -399,7 +510,12 @@ export default class ObsidianAgentsPlugin extends Plugin {
     if (!this.hermes) {
       this.hermes = new HermesInterface(this.settings);
     }
-    await this.hermes.sendMessage(requestMessages, wrappedHandlers, abort);
+    await this.hermes.sendMessage(requestMessages, wrappedHandlers, abort, {
+      sessionId,
+      callbackUrl: this.getCallbackUrl(),
+      callbackToken: this.settings.callbackEnabled ? this.getCallbackToken() : null,
+      skillId,
+    });
     return agentMsgId;
   }
 
@@ -563,5 +679,114 @@ class ObsidianAgentsSettingTab extends PluginSettingTab {
             }
           })
       );
+
+    // --- Callback server -------------------------------------------------
+    containerEl.createEl("h3", { text: "Background-job callback server" });
+
+    const callbackDesc = containerEl.createEl("p", {
+      cls: "setting-item-description",
+    });
+    callbackDesc.createSpan({
+      text:
+        "Lets scheduled/background jobs deliver their results back into a " +
+        "chat, a new chat, a vault note, or a toast. The plugin runs a tiny " +
+        "local HTTP server (default ",
+    });
+    callbackDesc.createEl("code", { text: "127.0.0.1" });
+    callbackDesc.createSpan({
+      text: ") that your Hermes gateway POSTs to when a job fires. Token-authed.",
+    });
+
+    const currentUrl = this.plugin.getCallbackUrl();
+    const urlDisplay = containerEl.createEl("p", {
+      cls: "setting-item-description",
+    });
+    urlDisplay.createSpan({ text: "Current endpoint: " });
+    urlDisplay.createEl("code", {
+      text: currentUrl ? `${currentUrl}/callback` : "(server not running)",
+    });
+
+    new Setting(containerEl)
+      .setName("Enable callback server")
+      .setDesc("Turn off to fully disable background-job delivery.")
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.callbackEnabled).onChange(async (value) => {
+          this.plugin.settings.callbackEnabled = value;
+          await this.plugin.savePluginSettings();
+          await this.plugin.restartCallbackServer();
+          this.display();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Bind host")
+      .setDesc(
+        '"127.0.0.1" (default) accepts only local connections. Use "0.0.0.0" to accept LAN connections — combine with the token for safety.'
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder("127.0.0.1")
+          .setValue(this.plugin.settings.callbackHost)
+          .onChange(async (value) => {
+            this.plugin.settings.callbackHost = value.trim() || "127.0.0.1";
+            await this.plugin.savePluginSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Bind port")
+      .setDesc("0 = pick any free port. Set a fixed port if your gateway needs a stable URL.")
+      .addText((text) =>
+        text
+          .setPlaceholder("0")
+          .setValue(String(this.plugin.settings.callbackPort))
+          .onChange(async (value) => {
+            const n = parseInt(value, 10);
+            this.plugin.settings.callbackPort = Number.isFinite(n) && n >= 0 ? n : 0;
+            await this.plugin.savePluginSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Shared token")
+      .setDesc(
+        "Required in the Authorization: Bearer header (or ?token= query). Auto-generated on first run."
+      )
+      .addText((text) =>
+        text
+          .setValue(this.plugin.settings.callbackToken)
+          .onChange(async (value) => {
+            this.plugin.settings.callbackToken = value.trim();
+            await this.plugin.savePluginSettings();
+          })
+      )
+      .addButton((btn) =>
+        btn
+          .setButtonText("Regenerate")
+          .setWarning()
+          .onClick(async () => {
+            this.plugin.settings.callbackToken = Math.random()
+              .toString(36)
+              .slice(2) + Date.now().toString(36) + Math.random().toString(36).slice(2);
+            await this.plugin.savePluginSettings();
+            await this.plugin.restartCallbackServer();
+            this.display();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Apply changes")
+      .setDesc("Restart the server to pick up host/port/token changes.")
+      .addButton((btn) =>
+        btn
+          .setButtonText("Restart server")
+          .setCta()
+          .onClick(async () => {
+            await this.plugin.restartCallbackServer();
+            new Notice("Callback server restarted.");
+            this.display();
+          })
+      );
+
   }
 }

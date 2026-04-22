@@ -22,6 +22,10 @@ export interface ChatMessage {
   attachments: Attachment[];
   timestamp: number;
   metadata?: MessageMetadata;
+  // Slash-skill invoked for this message (e.g. "automation"). User messages
+  // only. Rendered as a pill in the bubble so there's a visible trace that
+  // the skill was applied per-request.
+  skillId?: string;
 }
 
 export interface Attachment {
@@ -78,6 +82,13 @@ export interface ObsidianAgentsSettings {
   hermesApiKey: string;
   contextWindow: number;
   approvalMode: ApprovalMode;
+  // Local callback server — lets scheduled/background jobs run by the gateway
+  // deliver their results back into a specific chat, a new chat, a vault note,
+  // or a toast. See src/callback/ for details.
+  callbackEnabled: boolean;
+  callbackHost: string;   // default "127.0.0.1"
+  callbackPort: number;   // 0 = auto-pick an ephemeral port
+  callbackToken: string;  // shared secret — auto-generated on first run
 }
 
 export const DEFAULT_SETTINGS: ObsidianAgentsSettings = {
@@ -88,7 +99,36 @@ export const DEFAULT_SETTINGS: ObsidianAgentsSettings = {
   hermesApiKey: "",
   contextWindow: 128000,
   approvalMode: "manual",
+  callbackEnabled: true,
+  callbackHost: "127.0.0.1",
+  callbackPort: 0,
+  callbackToken: "",
 };
+
+// --- Delivery channels -----------------------------------------------------
+// A channel is the destination a scheduled/background job writes its result
+// to. The registry is open: anyone can drop a new channel into
+// src/callback/channels/ and register it in src/callback/channels/index.ts.
+
+export interface DeliveryPayload {
+  // Primary body — markdown, rendered the same way as any agent message.
+  content: string;
+  // Optional short title for channels that need one (e.g. new-chat, note).
+  title?: string;
+  // Free-form metadata the channel may consume (jobId, scheduled time, etc).
+  // Surfaced to the user so they can see what fired.
+  metadata?: Record<string, unknown>;
+}
+
+export interface DeliveryRequest {
+  channel: string;           // e.g. "chat", "new-chat", "note", "notice"
+  // When channel === "chat" this is the session id the job should reply into.
+  // Injected into the system prompt so the agent knows the current session.
+  sessionId?: string;
+  // Channel-specific target. For "note" this is a vault path. Ignored otherwise.
+  target?: string;
+  payload: DeliveryPayload;
+}
 
 export interface MentionItem {
   type: "file" | "folder";

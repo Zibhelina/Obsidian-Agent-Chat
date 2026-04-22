@@ -1,63 +1,21 @@
-const HERMES_COMMANDS = [
-	"/help",
-	"/model",
-	"/tools",
-	"/memory",
-	"/settings",
-	"/clear",
-	"/save",
-	"/load",
-	"/export",
-];
+// Slash commands are now backed by the skill registry — see src/skills/.
+// This file used to hold a stale hard-coded list of Hermes CLI commands that
+// were typed literally into the model without effect. Keep this module as a
+// thin shim so older imports don't break while we migrate callers.
 
-export function getHermesCommands(): string[] {
-	return [...HERMES_COMMANDS];
-}
+import { SkillRegistry, type Skill } from "../skills";
+
+const registry = new SkillRegistry();
 
 export function filterCommands(query: string): string[] {
-	const lower = query.toLowerCase();
-	return HERMES_COMMANDS.filter((cmd) => cmd.toLowerCase().includes(lower));
+	return registry.filter(query).map((s) => s.id);
 }
 
-export function renderCommandPopover(
-	container: HTMLElement,
-	commands: string[],
-	onSelect: (cmd: string) => void
-): HTMLElement {
-	const popover = container.createDiv({ cls: "obsidian-agents-command-popover" });
-	popover.empty();
-
-	if (commands.length === 0) {
-		const empty = popover.createDiv({ cls: "obsidian-agents-command-empty" });
-		empty.setText("No commands found");
-		return popover;
-	}
-
-	const list = popover.createEl("ul", { cls: "obsidian-agents-command-list" });
-	for (const cmd of commands) {
-		const li = list.createEl("li", { cls: "obsidian-agents-command-item" });
-		li.setText(cmd);
-		li.addEventListener("click", () => {
-			onSelect(cmd);
-			popover.remove();
-		});
-	}
-
-	return popover;
+export function getSkillRegistry(): SkillRegistry {
+	return registry;
 }
 
-export function isCommand(text: string): boolean {
-	return text.trimStart().startsWith("/");
+export function getSkill(id: string): Skill | undefined {
+	return registry.get(id);
 }
 
-export function parseCommand(text: string): { command: string; args: string } {
-	const trimmed = text.trimStart();
-	const spaceIdx = trimmed.indexOf(" ");
-	if (spaceIdx === -1) {
-		return { command: trimmed.slice(1), args: "" };
-	}
-	return {
-		command: trimmed.slice(1, spaceIdx),
-		args: trimmed.slice(spaceIdx + 1).trim(),
-	};
-}

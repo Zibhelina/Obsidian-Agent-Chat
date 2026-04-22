@@ -40,7 +40,8 @@ export interface IObsidianAgentsPlugin {
     sessionId: string,
     text: string,
     attachments: Attachment[],
-    handlers: StreamHandlers
+    handlers: StreamHandlers,
+    skillId?: string | null
   ): Promise<string | null>;
   isStreaming(sessionId: string): boolean;
   getStreamMessageId(sessionId: string): string | null;
@@ -124,8 +125,8 @@ export class ChatView extends ItemView {
 
     this.composer = new Composer(
       chatPanel,
-      (text, attachments) => {
-        this.doSendMessage(text, attachments);
+      (text, attachments, skillId) => {
+        this.doSendMessage(text, attachments, skillId ?? null);
       },
       () => {
         if (this.currentSessionId) this.plugin.abortStream(this.currentSessionId);
@@ -255,7 +256,11 @@ export class ChatView extends ItemView {
     return `${timeGreet} ${p}`;
   }
 
-  private async doSendMessage(text: string, attachments: Attachment[]): Promise<void> {
+  private async doSendMessage(
+    text: string,
+    attachments: Attachment[],
+    skillId: string | null = null
+  ): Promise<void> {
     if (!this.currentSessionId) return;
     // Capture the session id at send-time so late stream events apply to the
     // right session even if the user navigates away.
@@ -387,7 +392,7 @@ export class ChatView extends ItemView {
       },
     };
 
-    await this.plugin.sendMessage(sessionId, text, attachments, handlers);
+    await this.plugin.sendMessage(sessionId, text, attachments, handlers, skillId);
   }
 
   showPermissionWidget(toolCall: ToolCall): void {

@@ -96,6 +96,53 @@ src/
 - [ ] Export sessions to markdown
 - [ ] Search across chat history
 
+## Background-job callback server
+
+The plugin runs a small local HTTP server so scheduled / background jobs (cron, deferred tasks) run by your Hermes gateway can deliver their results back into the right place — the chat that scheduled the job, a new chat, a vault note, or a toast notification.
+
+- Default bind: `127.0.0.1` on an ephemeral port, token-authed.
+- Configure host, port, and token under **Settings → Obsidian Agents → Background-job callback server**.
+- The plugin injects the current callback URL, token, and session id into the system prompt on every request — the agent uses that context to tell the gateway where to POST.
+
+### Choosing a delivery channel
+
+The agent picks a channel based on the user's phrasing. Examples:
+
+| User says… | Channel | Target |
+|---|---|---|
+| "…reply here when it's done." | `chat` | current session |
+| "…reply in a new chat." | `new-chat` | — |
+| "…save the result to `Daily/Summary.md`." | `note` | vault path |
+| "…just ping me." | `notice` | — |
+| *(no destination specified)* | `chat` *(default)* | current session |
+
+### Gateway HTTP contract
+
+Whichever scheduler or cron runner your Hermes gateway uses, it should POST to the plugin's callback endpoint when a job fires:
+
+```
+POST http://127.0.0.1:<port>/callback
+Authorization: Bearer <callback_token>
+Content-Type: application/json
+
+{
+  "channel": "chat" | "new-chat" | "note" | "notice",
+  "sessionId": "<session id>",
+  "target": "Daily/Summary.md",
+  "payload": {
+    "content": "...markdown body...",
+    "title": "optional short label",
+    "metadata": { "jobId": "...", "firedAt": "..." }
+  }
+}
+```
+
+The plugin responds `200 {ok:true, channel}` on success, `400` for bad input, `401` for bad token, `500` for delivery errors.
+
+### Adding your own channel
+
+Channels are pluggable. Drop a file into `src/callback/channels/` implementing the `DeliveryChannel` interface and register it in `src/callback/channels/index.ts`. The built-in channels (`chat`, `new-chat`, `note`, `notice`) are reference implementations.
+
 ## Author
 
 Joao Henrique Costa Araujo

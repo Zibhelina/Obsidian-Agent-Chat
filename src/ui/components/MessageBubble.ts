@@ -76,7 +76,23 @@ export class MessageBubble extends Component {
       const displayText = this.message.content
         .replace(/@\[[^\]]*\]\([^)]*\)/g, "")
         .trim();
-      this.contentEl.setText(displayText || this.message.content);
+      // If a slash skill was active, prepend a pill so the trace survives
+      // into the submitted bubble.
+      if (this.message.skillId) {
+        const pill = this.contentEl.createSpan({
+          cls: "obsidian-agents-composer-skill-pill",
+        });
+        pill.createSpan({
+          cls: "obsidian-agents-composer-skill-pill-slash",
+          text: "/",
+        });
+        pill.createSpan({
+          cls: "obsidian-agents-composer-skill-pill-name",
+          text: this.message.skillId,
+        });
+        this.contentEl.appendText(" ");
+      }
+      this.contentEl.appendText(displayText || this.message.content);
     } else {
       const blocks: LayoutBlock[] = [];
       if (this.message.attachments) {
