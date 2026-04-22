@@ -1060,23 +1060,38 @@ button.obsidian-agents-message-action-btn:hover {
   gap: 4px;
   background: var(--background-secondary);
   border: 1px solid var(--background-modifier-border);
-  /* Both states animate on the same 28px radius — the corners are
-     always fully rounded at the 52-56px heights this composer lives
-     at, so there's nothing to interpolate between and no abrupt
-     snap at either end of the transition. */
+  /* Hold a single 28px radius across every state — at the heights this
+     composer lives at (52-90px) 28px reads as fully rounded when
+     compact and as a soft curve when taller, with no interpolation
+     discontinuity. */
   border-radius: 28px;
   padding: 6px 8px 6px 8px;
+  /* Single unified easing — only padding and min-height animate, both
+     on the same curve + duration so the change reads as one motion
+     rather than staggered parallel tracks. */
   transition: border-color 0.15s, box-shadow 0.15s,
-    padding 0.22s cubic-bezier(0.4, 0, 0.2, 1),
-    min-height 0.22s cubic-bezier(0.4, 0, 0.2, 1);
+    padding 0.26s cubic-bezier(0.22, 0.61, 0.36, 1),
+    min-height 0.26s cubic-bezier(0.22, 0.61, 0.36, 1);
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.06);
 }
 
-/* Animate the skill-chip row sliding down into view when the first
-   chip is added (expanding the composer vertically). */
+/* Chip row expands in place rather than toggling display — the
+   opacity+max-width fade keeps the transition coherent with the
+   wrap's height change. */
 .obsidian-agents-composer-skill-chips {
-  transition: max-height 0.18s ease, opacity 0.18s ease,
-    padding 0.18s ease;
+  display: flex;
+  overflow: hidden;
+  max-width: 100%;
+  opacity: 1;
+  transition: max-width 0.26s cubic-bezier(0.22, 0.61, 0.36, 1),
+    opacity 0.22s ease, margin 0.26s ease;
+}
+
+.obsidian-agents-composer-skill-chips-empty {
+  max-width: 0 !important;
+  opacity: 0;
+  margin: 0;
+  pointer-events: none;
 }
 
 .obsidian-agents-composer-input-wrap:focus-within {

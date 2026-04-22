@@ -107,8 +107,9 @@ export class Composer extends Component {
     });
 
     // Inline skill chip row, sharing the bottom bar with the action buttons.
-    this.skillChipsEl = bottomBar.createDiv({ cls: "obsidian-agents-composer-skill-chips" });
-    this.skillChipsEl.style.display = "none";
+    this.skillChipsEl = bottomBar.createDiv({
+      cls: "obsidian-agents-composer-skill-chips obsidian-agents-composer-skill-chips-empty",
+    });
 
     // Spacer pushes expand + send to the right edge regardless of chip count.
     bottomBar.createDiv({ cls: "obsidian-agents-composer-bottom-spacer" });
@@ -361,11 +362,13 @@ export class Composer extends Component {
   private renderSkillChips(): void {
     this.autoResize();
     this.skillChipsEl.empty();
-    if (this.activeSkills.length === 0) {
-      this.skillChipsEl.style.display = "none";
-      return;
-    }
-    this.skillChipsEl.style.display = "flex";
+    // Toggle a class instead of flipping `display` so CSS transitions
+    // on the chip row's opacity / max-height can actually run.
+    this.skillChipsEl.toggleClass(
+      "obsidian-agents-composer-skill-chips-empty",
+      this.activeSkills.length === 0
+    );
+    if (this.activeSkills.length === 0) return;
     for (const skill of this.activeSkills) {
       const chip = this.skillChipsEl.createDiv({
         cls: "obsidian-agents-composer-skill-chip",
