@@ -3928,15 +3928,21 @@ button.obsidian-agents-tree-item-menu {
    the rule below. */
 .obsidian-agents-session-indicator {
   position: absolute;
-  right: 8px;
-  top: calc(50% - 5px);
-  width: 10px;
-  height: 10px;
+  right: 2px;
+  top: calc(50% - 7px);
+  width: 14px;
+  height: 14px;
   flex: 0 0 auto;
   box-sizing: border-box;
 }
 
 .obsidian-agents-session-unread-dot {
+  /* Dot itself is smaller than the 14x14 slot — keeps it visually balanced
+     next to the spinner (which fills the slot) while matching ChatGPT's
+     proportions. */
+  width: 10px;
+  height: 10px;
+  margin: 2px;
   border-radius: 50%;
   background: var(--interactive-accent);
 }

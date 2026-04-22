@@ -531,12 +531,11 @@ export default class ObsidianAgentsPlugin extends Plugin {
           durationMs,
         };
         session.updatedAt = Date.now();
-        // If the user is actively viewing this session when it finishes,
-        // mark the reply as already read so the unread dot doesn't pop up
-        // on the chat they're looking at.
-        if (this.activeSessionId === sessionId) {
-          session.lastReadAt = session.updatedAt;
-        }
+        // Don't auto-stamp lastReadAt here. The unread dot is suppressed
+        // for the currently-active session by isSessionUnread()'s guard,
+        // but we still want the dot to appear the moment the user clicks
+        // away — so we only advance the read cursor on an explicit
+        // selectSession().
         this.activeStreams.delete(sessionId);
         this.saveSessionsData();
         handlers.onComplete(metadata);
