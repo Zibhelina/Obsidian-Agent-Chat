@@ -1050,7 +1050,6 @@ button.obsidian-agents-message-action-btn:hover {
 .obsidian-agents-composer.obsidian-agents-composer-compact
   > .obsidian-agents-composer-input-wrap {
   padding: 8px 10px 8px 10px;
-  border-radius: 999px;
   min-height: 52px;
 }
 
@@ -1061,10 +1060,15 @@ button.obsidian-agents-message-action-btn:hover {
   gap: 4px;
   background: var(--background-secondary);
   border: 1px solid var(--background-modifier-border);
+  /* Both states animate on the same 28px radius — the corners are
+     always fully rounded at the 52-56px heights this composer lives
+     at, so there's nothing to interpolate between and no abrupt
+     snap at either end of the transition. */
   border-radius: 28px;
   padding: 6px 8px 6px 8px;
   transition: border-color 0.15s, box-shadow 0.15s,
-    border-radius 0.18s ease, padding 0.18s ease, min-height 0.18s ease;
+    padding 0.22s cubic-bezier(0.4, 0, 0.2, 1),
+    min-height 0.22s cubic-bezier(0.4, 0, 0.2, 1);
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.06);
 }
 
