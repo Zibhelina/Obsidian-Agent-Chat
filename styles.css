@@ -382,7 +382,7 @@ button.obsidian-agents-tree-item-menu:hover {
 }
 
 .obsidian-agents-chat-panel.obsidian-agents-empty .obsidian-agents-composer > * {
-  max-width: 520px;
+  max-width: 570px;
   width: 100%;
 }
 
@@ -1039,7 +1039,7 @@ button.obsidian-agents-message-action-btn:hover {
    the pill horizontally, only vertically. */
 .obsidian-agents-composer > * {
   width: 100%;
-  max-width: 520px;
+  max-width: 570px;
   box-sizing: border-box;
   margin: 0 auto;
 }
