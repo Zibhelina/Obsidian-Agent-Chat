@@ -584,14 +584,41 @@ button.obsidian-agents-message-action-btn:hover {
 .obsidian-agents-message-bubble h2 { font-size: 1.3em; }
 .obsidian-agents-message-bubble h3 { font-size: 1.15em; }
 
-.obsidian-agents-message-bubble ul,
-.obsidian-agents-message-bubble ol {
-  margin: 8px 0 12px;
-  padding-left: 24px;
+/* Override Obsidian theme's --list-indent (often 2em+) inside message bubbles,
+   and target the `.markdown-rendered` wrapper that themes use to apply big
+   list padding via higher-specificity selectors. */
+.obsidian-agents-message-bubble,
+.obsidian-agents-message-bubble .markdown-rendered {
+  --list-indent: 1.5em;
+  --list-indent-editor: 1.5em;
+  --list-spacing: 0.075em;
 }
 
-.obsidian-agents-message-bubble li {
+.obsidian-agents-message-bubble ul,
+.obsidian-agents-message-bubble ol,
+.obsidian-agents-message-bubble .markdown-rendered ul,
+.obsidian-agents-message-bubble .markdown-rendered ol {
+  margin: 8px 0 12px;
+  padding-left: 1.5em;
+  padding-inline-start: 1.5em;
+}
+
+.obsidian-agents-message-bubble li,
+.obsidian-agents-message-bubble .markdown-rendered li {
   margin: 4px 0;
+  padding-left: 0;
+  padding-inline-start: 0;
+  text-indent: 0;
+}
+
+/* Nested lists: indent one step from parent, not from bubble edge. */
+.obsidian-agents-message-bubble li > ul,
+.obsidian-agents-message-bubble li > ol,
+.obsidian-agents-message-bubble .markdown-rendered li > ul,
+.obsidian-agents-message-bubble .markdown-rendered li > ol {
+  margin: 4px 0;
+  padding-left: 1.25em;
+  padding-inline-start: 1.25em;
 }
 
 .obsidian-agents-message-bubble blockquote {
