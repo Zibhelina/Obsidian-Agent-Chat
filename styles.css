@@ -811,7 +811,6 @@ button.obsidian-agents-message-action-btn:hover {
   min-width: 320px;
   flex-shrink: 0;
   background: var(--background-primary);
-  border-left: 1px solid var(--background-modifier-border);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -2811,7 +2810,6 @@ button.obsidian-agents-composer-skill-chip-remove:hover {
     z-index: 41;
     background: var(--background-primary);
     border-right: none;
-    border-bottom: 1px solid var(--background-modifier-border);
   }
   .obsidian-agents-greeting {
     font-size: 22px;
