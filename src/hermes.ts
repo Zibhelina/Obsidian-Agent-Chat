@@ -8,6 +8,9 @@ import * as https from "https";
 import { URL } from "url";
 import { generateId } from "./lib/id";
 import { SkillRegistry } from "./skills";
+import { createContextDebugSnapshot } from "./contextDebug";
+import { readActiveModel } from "./lib/hermesConfig";
+import { getTraceArtifactPath, hasTracePayload } from "./traceArtifacts";
 
 const HERMES_ENV_PATH = join(homedir(), ".hermes", ".env");
 const REQUEST_TIMEOUT_MS = 7200000; // 2 hours
@@ -64,6 +67,24 @@ function getApiKey(settings: ObsidianAgentsSettings): string {
   if (settings.hermesApiKey) return settings.hermesApiKey;
   const env = parseEnv(readTextFile(HERMES_ENV_PATH));
   return env.API_SERVER_KEY || "";
+}
+
+function formatGatewayConnectionError(error: unknown, gatewayUrl: string): string {
+  const raw = error instanceof Error ? error.message : String(error);
+  const code =
+    error && typeof error === "object" && "code" in error
+      ? String((error as { code?: unknown }).code || "")
+      : "";
+  if (code === "ECONNREFUSED" || /ECONNREFUSED/.test(raw)) {
+    return `Cannot reach Hermes gateway at ${gatewayUrl}. Start the Hermes gateway, then try again.`;
+  }
+  if (code === "ENOTFOUND" || code === "EAI_AGAIN" || /ENOTFOUND|EAI_AGAIN/.test(raw)) {
+    return `Cannot resolve the Hermes gateway host for ${gatewayUrl}. Check the gateway URL in Obsidian Agents settings or ~/.hermes/.env.`;
+  }
+  if (code === "ECONNRESET" || code === "ETIMEDOUT" || /ECONNRESET|ETIMEDOUT/.test(raw)) {
+    return `Lost connection to Hermes gateway at ${gatewayUrl}. Check that the gateway is running and try again.`;
+  }
+  return raw;
 }
 
 const OBSIDIAN_AGENTS_SYSTEM_PROMPT = `You are running inside the Obsidian Agents Obsidian plugin. The UI renders your responses as markdown and supports a special capability: **inline applets** (interactive HTML or React) that you can embed and position anywhere in your reply.
@@ -130,6 +151,22 @@ The applet renders in a sandboxed iframe that is auto-themed: the user's current
 
 **Always** style your applets using these variables so they blend into the user's theme. Never hard-code colors.
 
+## Applet design quality
+
+Treat applets like small product artifacts, not decorative code snippets. Before emitting one, decide its job: explain, simulate, compare, calculate, prototype, or visualize. If none of those jobs apply, use plain markdown instead.
+
+Good applets should:
+- Match the user's context and visual vocabulary. For Obsidian Agents, prefer calm, dense, theme-native interfaces over generic SaaS gradients, fake dashboards, glassmorphism, and meaningless cards.
+- Have one clear primary object, restrained supporting metadata, consistent alignment, intentional whitespace, and readable hierarchy.
+- Include real interaction: buttons, sliders, inputs, filtering, dragging, canvas redraws, or meaningful state transitions. Static mockups belong in rich layout blocks or markdown, not applets.
+- Provide obvious default, selected, hover/focus, empty, and disabled states when those states exist.
+- Use concrete copy and labels. Avoid lorem ipsum unless placeholder content is itself the point.
+- Use placeholder shapes or labels when assets/icons are unavailable. A clear placeholder is better than a fake or mismatched asset.
+- Keep motion subtle and purposeful: transitions should clarify state, not decorate.
+- Be accessible: semantic buttons/inputs, visible focus styles, keyboard-reachable controls, and sufficient contrast through theme variables.
+
+Quality bar: the applet should look deliberately designed at first glance and be obvious to use without a manual. Substance beats size.
+
 ## Layout philosophy
 
 Compose replies like a polished Wikipedia article:
@@ -189,22 +226,123 @@ The renderer is strict about standard markdown block boundaries. Follow these ru
 
 type ContentPart =
   | { type: "text"; text: string }
-  | { type: "image_url"; image_url: { url: string } };
+  | { type: "image_url"; image_url: { url: string } }
+  | { type: "input_audio"; input_audio: { data: string; format: string } };
 
-function buildMessageContent(msg: ChatMessage): string | ContentPart[] {
-  const images = (msg.attachments ?? []).filter(
+// Max base64 payload per image before we re-encode at send time. Hermes
+// gateway rejects requests over ~1 MB total with a 413, so we keep each
+// image well under that and leave headroom for text + other images.
+const MAX_IMAGE_DATAURL_CHARS = 900 * 1024;
+const RESAMPLE_MAX_EDGE = 1280;
+const RESAMPLE_QUALITY = 0.8;
+const ATTACHMENT_INLINE_CONTEXT_RATIO = 0.8;
+
+async function shrinkDataUrl(dataUrl: string): Promise<string> {
+  if (dataUrl.length <= MAX_IMAGE_DATAURL_CHARS) return dataUrl;
+  if (dataUrl.startsWith("data:image/svg+xml")) return dataUrl;
+  if (typeof document === "undefined" || typeof Image === "undefined") return dataUrl;
+
+  const img = await new Promise<HTMLImageElement | null>((resolve) => {
+    const el = new Image();
+    el.onload = () => resolve(el);
+    el.onerror = () => resolve(null);
+    el.src = dataUrl;
+  });
+  if (!img) return dataUrl;
+
+  const scale = Math.min(1, RESAMPLE_MAX_EDGE / Math.max(img.width, img.height));
+  const w = Math.max(1, Math.round(img.width * scale));
+  const h = Math.max(1, Math.round(img.height * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return dataUrl;
+  ctx.drawImage(img, 0, 0, w, h);
+  return canvas.toDataURL("image/jpeg", RESAMPLE_QUALITY);
+}
+
+interface BuildMessageContentOptions {
+  includeBinaryAttachments: boolean;
+  includeAttachmentRefs: boolean;
+  attachmentOmissionReason?: string;
+}
+
+async function buildMessageContent(
+  msg: ChatMessage,
+  options: BuildMessageContentOptions
+): Promise<string | ContentPart[]> {
+  const refBlock = options.includeAttachmentRefs
+    ? buildAttachmentReferenceBlock(msg, options.attachmentOmissionReason)
+    : null;
+  const textContent = refBlock ? `${msg.content || ""}\n\n${refBlock}`.trim() : msg.content;
+  if (!options.includeBinaryAttachments) return textContent;
+
+  const atts = msg.attachments ?? [];
+  const images = atts.filter(
     (a) => a.type === "image" && typeof a.dataUrl === "string" && a.dataUrl.length > 0
   );
-  if (images.length === 0) return msg.content;
+  const audios = atts.filter(
+    (a) => a.type === "audio" && typeof a.dataUrl === "string" && a.dataUrl.length > 0
+  );
+  if (images.length === 0 && audios.length === 0) return textContent;
 
   const parts: ContentPart[] = [];
-  if (msg.content && msg.content.length > 0) {
-    parts.push({ type: "text", text: msg.content });
+  if (textContent && textContent.length > 0) {
+    parts.push({ type: "text", text: textContent });
   }
   for (const img of images) {
-    parts.push({ type: "image_url", image_url: { url: img.dataUrl as string } });
+    const url = await shrinkDataUrl(img.dataUrl as string);
+    parts.push({ type: "image_url", image_url: { url } });
+  }
+  for (const audio of audios) {
+    // OpenAI-compat input_audio expects raw base64 (no data: prefix) and a
+    // bare format string ("mp3", "wav", …). Mention-loaded audio attachments
+    // already store the base64 sans prefix; defensively strip a prefix in
+    // case the source ever changes.
+    const raw = audio.dataUrl as string;
+    const base64 = raw.startsWith("data:")
+      ? raw.slice(raw.indexOf(",") + 1)
+      : raw;
+    const format = audio.audioFormat || "mp3";
+    parts.push({ type: "input_audio", input_audio: { data: base64, format } });
   }
   return parts;
+}
+
+function buildAttachmentReferenceBlock(msg: ChatMessage, omissionReason?: string): string | null {
+  const lines: string[] = [];
+  const bundleItems = msg.contextBundle?.items.filter((item) => item.source !== "mention") ?? [];
+
+  for (const item of bundleItems) {
+    const refs: string[] = [];
+    if (item.original?.localPath) refs.push(`original=${item.original.localPath}`);
+    else if (item.original?.vaultPath) refs.push(`original=${item.original.vaultPath}`);
+    if (item.derivatives?.length) {
+      const derivative = item.derivatives[0];
+      refs.push(`preview=${derivative.localPath || derivative.vaultPath || derivative.id}`);
+    }
+    if (!refs.length && item.localPath) refs.push(`path=${item.localPath}`);
+    else if (!refs.length && item.vaultPath) refs.push(`path=${item.vaultPath}`);
+    const size = item.sizeBytes ? ` | size=${item.sizeBytes}` : "";
+    const status = item.status ? ` | status=${item.status}` : "";
+    lines.push(`- ${item.id}: ${item.kind} ${item.name}${status}${size}${refs.length ? ` | ${refs.join(" | ")}` : ""}`);
+  }
+
+  if (lines.length === 0) {
+    for (const [index, attachment] of (msg.attachments ?? []).entries()) {
+      const path = attachment.path ? ` | path=${attachment.path}` : "";
+      const size = attachment.sizeBytes ? ` | size=${attachment.sizeBytes}` : "";
+      const mime = attachment.mime ? ` | mime=${attachment.mime}` : "";
+      lines.push(`- attachment_${index + 1}: ${attachment.type} ${attachment.name}${mime}${size}${path}`);
+    }
+  }
+
+  if (lines.length === 0) return null;
+  const reason = omissionReason
+    ? `\nReason current pixels/audio were not attached: ${omissionReason}`
+    : "";
+  return `<attachment_context_refs message_id="${msg.id}">\nAttachments are stored outside the active context and are reference-only unless this same request includes image_url/input_audio parts. Do not claim to have inspected pixels, audio, or file contents unless they were attached in this request or you explicitly inspect/transcribe the referenced path with tools or a narrow delegated agent.${reason}\n${lines.join("\n")}\n</attachment_context_refs>`;
 }
 
 export interface RuntimeContext {
@@ -217,6 +355,26 @@ export interface RuntimeContext {
   skillIds?: string[];
 }
 
+interface RoutingInfo {
+  provider?: string;
+  model?: string;
+  baseUrl?: string;
+}
+
+function getRoutingInfo(settings: ObsidianAgentsSettings): RoutingInfo {
+  const active = readActiveModel();
+  const model =
+    active.model ||
+    (settings.model && settings.model !== "auto" ? settings.model : undefined) ||
+    undefined;
+  const provider = active.provider || inferProvider(model) || undefined;
+  return {
+    provider,
+    model,
+    baseUrl: active.baseUrl || undefined,
+  };
+}
+
 function buildRuntimeContextBlock(ctx: RuntimeContext): string | null {
   const lines: string[] = [];
   if (ctx.sessionId) lines.push(`OBSIDIAN_AGENTS_SESSION_ID=${ctx.sessionId}`);
@@ -226,15 +384,89 @@ function buildRuntimeContextBlock(ctx: RuntimeContext): string | null {
   return `\n\n## Runtime context\n\n\`\`\`\n${lines.join("\n")}\n\`\`\``;
 }
 
-function buildMessages(
+function buildRuntimeMetadataBlock(routing: RoutingInfo): string {
+  const now = new Date();
+  let timeZone = "";
+  try {
+    timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "";
+  } catch {
+    timeZone = "";
+  }
+
+  const localTime = now.toLocaleString(undefined, { timeZoneName: "short" });
+  const lines = [
+    `Current local date/time: ${localTime}`,
+    `Current UTC date/time: ${now.toISOString()}`,
+  ];
+  if (timeZone) lines.push(`Current IANA timezone: ${timeZone}`);
+  lines.push(`Active Hermes provider: ${routing.provider || "gateway default"}`);
+  lines.push(`Active Hermes model: ${routing.model || "gateway default"}`);
+  if (routing.baseUrl) lines.push(`Active Hermes base URL: ${routing.baseUrl}`);
+
+  return `\n\n## Runtime metadata\n\n${lines
+    .map((line) => `- ${line}`)
+    .join("\n")}\n\nUse this metadata when answering questions about the current date, time, provider, model, or runtime context.`;
+}
+
+function buildFileHandlingPolicyBlock(): string {
+  return `\n\n## File and image handling policy\n\nObsidian Agents stores pasted/dropped files under agent-vault runtime paths and sends compact context bundles with IDs like ctx_1. Historical images, audio, PDFs, and other files are reference-only by default; their base64 payloads are not replayed on later turns. Current-turn image/audio pixels may be attached only when the request budget allows it.\n\nBe explicit and honest about this: if a referenced file/image was not attached as pixels/audio in the current request, say you have a reference/path, not that you have visually inspected it. When the referenced artifact is relevant, use available tools to inspect the path. If it is large or would consume too much context, delegate a narrow self-contained agent/task with the artifact path and the exact information needed, then report the bottleneck or result back to the user.`;
+}
+
+function buildTraceReferenceBlock(
+  history: ChatMessage[],
+  runtime?: RuntimeContext
+): string | null {
+  const refs: string[] = [];
+  for (const msg of history) {
+    if (msg.role !== "agent") continue;
+    const metadata = msg.metadata;
+    if (!metadata) continue;
+
+    const ref =
+      metadata.traceRef ??
+      (runtime?.sessionId && hasTracePayload(msg)
+        ? {
+            path: getTraceArtifactPath(runtime.sessionId, msg.id),
+            createdAt: Date.now(),
+            thinkingChars: metadata.thinking?.length,
+            toolCallCount: metadata.toolCalls?.length,
+            hasContextDebug: Boolean(metadata.contextDebug),
+          }
+        : null);
+    if (!ref) continue;
+
+    const facts: string[] = [];
+    if (ref.thinkingChars) facts.push(`${ref.thinkingChars.toLocaleString()} reasoning chars`);
+    if (ref.toolCallCount) facts.push(`${ref.toolCallCount} tool calls`);
+    if (ref.hasContextDebug) facts.push("context debug snapshot");
+    const when = new Date(msg.timestamp).toISOString();
+    refs.push(`- ${when} assistant message ${msg.id}: ${ref.path}${facts.length ? ` (${facts.join(", ")})` : ""}`);
+  }
+
+  if (refs.length === 0) return null;
+  const kept = refs.slice(-25);
+  const omitted = refs.length - kept.length;
+  return `\n\n## Archived activity trace pointers\n\nPrior assistant reasoning traces, tool-call activity, and debug snapshots are archived outside the normal chat transcript. Do not assume their exact contents from memory. If a later answer needs the exact prior steps or tool activity, inspect the referenced file first.\n\n${omitted > 0 ? `Older trace refs omitted from this compact list: ${omitted}.\n` : ""}${kept.join("\n")}`;
+}
+
+async function buildMessages(
   history: ChatMessage[],
   runtime?: RuntimeContext,
-  registry?: SkillRegistry
-): Array<{ role: string; content: string | ContentPart[] }> {
+  registry?: SkillRegistry,
+  routing: RoutingInfo = {},
+  options: {
+    includeCurrentAttachments?: boolean;
+    currentAttachmentOmissionReason?: string;
+  } = {}
+): Promise<Array<{ role: string; content: string | ContentPart[] }>> {
   const withSystem: Array<{ role: string; content: string | ContentPart[] }> = [];
   const hasSystem = history.some((m) => m.role === "system");
   if (!hasSystem) {
     let prompt = OBSIDIAN_AGENTS_SYSTEM_PROMPT;
+    prompt += buildRuntimeMetadataBlock(routing);
+    prompt += buildFileHandlingPolicyBlock();
+    const traceBlock = buildTraceReferenceBlock(history, runtime);
+    if (traceBlock) prompt += traceBlock;
     const skills = (runtime?.skillIds ?? [])
       .map((id) => registry?.get(id))
       .filter((s): s is NonNullable<typeof s> => !!s);
@@ -249,13 +481,41 @@ function buildMessages(
     }
     withSystem.push({ role: "system", content: prompt });
   }
-  for (const msg of history) {
+  const currentIndex = history.length - 1;
+  for (let index = 0; index < history.length; index++) {
+    const msg = history[index];
+    const isCurrentMessage = index === currentIndex;
+    const includeBinaryAttachments =
+      isCurrentMessage && options.includeCurrentAttachments !== false;
     withSystem.push({
       role: msg.role === "agent" ? "assistant" : msg.role,
-      content: buildMessageContent(msg),
+      content: await buildMessageContent(msg, {
+        includeBinaryAttachments,
+        includeAttachmentRefs: !isCurrentMessage || !includeBinaryAttachments,
+        attachmentOmissionReason:
+          isCurrentMessage && !includeBinaryAttachments
+            ? options.currentAttachmentOmissionReason
+            : undefined,
+      }),
     });
   }
   return withSystem;
+}
+
+function hasInlineBinaryContent(messages: Array<{ role: string; content: string | ContentPart[] }>): boolean {
+  return messages.some((message) =>
+    Array.isArray(message.content) &&
+    message.content.some((part) => part.type === "image_url" || part.type === "input_audio")
+  );
+}
+
+function shouldOmitCurrentAttachmentsForBudget(
+  messages: Array<{ role: string; content: string | ContentPart[] }>,
+  contextWindow: number | undefined
+): boolean {
+  if (!contextWindow || contextWindow <= 0 || !hasInlineBinaryContent(messages)) return false;
+  const estimated = estimateTokens(JSON.stringify(messages));
+  return estimated >= contextWindow * ATTACHMENT_INLINE_CONTEXT_RATIO;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -342,8 +602,8 @@ function formatToolDisplay(tool: string, label: string, emoji: string): string {
 class ThinkingStripper {
   private mode: "content" | "thinking" = "content";
   private buffer = "";
-  private static readonly OPEN_TAGS = /<(thinking|think|reasoning)>/i;
-  private static readonly CLOSE_TAGS = /<\/(thinking|think|reasoning)>/i;
+  private static readonly OPEN_TAGS = /<(thinking|think|reasoning|thought|REASONING_SCRATCHPAD)>/i;
+  private static readonly CLOSE_TAGS = /<\/(thinking|think|reasoning|thought|REASONING_SCRATCHPAD)>/i;
   private static readonly MAX_BUFFER = 32;
 
   push(
@@ -418,6 +678,7 @@ export class HermesInterface {
 
     const gatewayUrl = getGatewayUrl(this.settings);
     const apiKey = getApiKey(this.settings);
+    const routing = getRoutingInfo(this.settings);
 
     if (!gatewayUrl) {
       handlers.onError(
@@ -428,14 +689,23 @@ export class HermesInterface {
       return;
     }
 
+    let requestMessages = await buildMessages(messages, runtime, this.skills, routing, {
+      includeCurrentAttachments: true,
+    });
+    if (shouldOmitCurrentAttachmentsForBudget(requestMessages, this.settings.contextWindow)) {
+      requestMessages = await buildMessages(messages, runtime, this.skills, routing, {
+        includeCurrentAttachments: false,
+        currentAttachmentOmissionReason:
+          `including the current image/audio payload would put the estimated request at or above ${Math.round(
+            ATTACHMENT_INLINE_CONTEXT_RATIO * 100
+          )}% of the configured context window`,
+      });
+    }
+
     const body: Record<string, unknown> = {
-      messages: buildMessages(messages, runtime, this.skills),
+      messages: requestMessages,
       stream: true,
     };
-
-    if (this.settings.model && this.settings.model !== "auto") {
-      body.model = this.settings.model;
-    }
 
     if (this.settings.effortLevel) {
       body.reasoning = { effort: this.settings.effortLevel, include_thoughts: true };
@@ -444,14 +714,29 @@ export class HermesInterface {
     }
     body.include_reasoning = true;
 
+    handlers.onContextDebug?.(
+      createContextDebugSnapshot({
+        rawRequest: body,
+        requestSource: "plugin_gateway_request",
+        model: routing.model,
+        provider: routing.provider,
+        sessionId: runtime?.sessionId,
+        contextWindow: this.settings.contextWindow,
+        compacted: "unknown",
+        compactionDetails: "Hermes/provider-side compaction is not visible from the plugin gateway request.",
+        warning:
+          "This is the plugin -> Hermes gateway request. If the gateway emits a Hermes model request event, it will replace this snapshot with the expanded SOUL/USER/skills/provider payload.",
+      })
+    );
+
     try {
-      await this.streamChatCompletion(gatewayUrl, apiKey, body, handlers, signal);
+      await this.streamChatCompletion(gatewayUrl, apiKey, body, handlers, signal, runtime, routing);
     } catch (error) {
       if (signal.aborted) {
         handlers.onComplete({});
         return;
       }
-      const messageText = error instanceof Error ? error.message : String(error);
+      const messageText = formatGatewayConnectionError(error, gatewayUrl);
       handlers.onError(new Error(messageText));
     }
   }
@@ -461,7 +746,9 @@ export class HermesInterface {
     apiKey: string,
     body: Record<string, unknown>,
     handlers: StreamHandlers,
-    signal: AbortSignal
+    signal: AbortSignal,
+    runtime?: RuntimeContext,
+    routing: RoutingInfo = {}
   ): Promise<void> {
     return new Promise<void>((resolve, reject) => {
       let url: URL;
@@ -531,6 +818,8 @@ export class HermesInterface {
           let collectedReasoning = "";
           let finalUsage: Record<string, unknown> | null = null;
           let finalModel: string | null = null;
+          let contextDebugModel: string | null = null;
+          let contextDebugProvider: string | null = null;
           const seenToolIds = new Set<string>();
           let toolCounter = 0;
           const stripper = new ThinkingStripper();
@@ -574,6 +863,60 @@ export class HermesInterface {
                 handlers.onToolCall(toolCall);
               } catch {
                 /* ignore malformed */
+              }
+              return;
+            }
+
+            if (evt.event === "hermes.context.debug") {
+              try {
+                const payload = JSON.parse(evt.data) as Record<string, unknown>;
+                const rawRequest = payload.raw_request ?? payload.rawRequest ?? payload;
+                const model = asString(payload.model);
+                const provider = asString(payload.provider);
+                const sessionId = asString(payload.session_id ?? payload.sessionId);
+                const apiMode = asString(payload.api_mode ?? payload.apiMode);
+                const source = asString(payload.source);
+                const contextWindow =
+                  typeof payload.context_window === "number"
+                    ? payload.context_window
+                    : typeof payload.contextWindow === "number"
+                    ? payload.contextWindow
+                    : this.settings.contextWindow;
+                const estimatedTokens =
+                  typeof payload.estimated_tokens === "number"
+                    ? payload.estimated_tokens
+                    : typeof payload.estimatedTokens === "number"
+                    ? payload.estimatedTokens
+                    : undefined;
+                const compacted =
+                  payload.compacted === true || payload.compacted === false
+                    ? payload.compacted
+                    : "unknown";
+                const compactionDetails =
+                  asString(payload.compaction_details ?? payload.compactionDetails) ||
+                  "Hermes emitted this snapshot from the provider request path.";
+
+                if (model) contextDebugModel = model;
+                if (provider) contextDebugProvider = provider;
+                handlers.onContextDebug?.(
+                  createContextDebugSnapshot({
+                    rawRequest,
+                    requestSource:
+                      source === "hermes_model_request"
+                        ? "hermes_model_request"
+                        : "plugin_gateway_request",
+                    apiMode,
+                    model: model || routing.model,
+                    provider: provider || routing.provider || inferProvider(model || routing.model),
+                    sessionId: sessionId || runtime?.sessionId,
+                    contextWindow,
+                    estimatedTokens,
+                    compacted,
+                    compactionDetails,
+                  })
+                );
+              } catch {
+                /* ignore malformed debug payload */
               }
               return;
             }
@@ -683,14 +1026,24 @@ export class HermesInterface {
                 : typeof finalUsage?.output_tokens === "number"
                 ? (finalUsage.output_tokens as number)
                 : undefined;
+            const usageTotalTokens =
+              typeof finalUsage?.total_tokens === "number"
+                ? (finalUsage.total_tokens as number)
+                : typeof finalUsage?.totalTokens === "number"
+                ? (finalUsage.totalTokens as number)
+                : undefined;
 
             const totalTokens =
               promptTokens != null && completionTokens != null
                 ? promptTokens + completionTokens
-                : estimateTokens(collectedText);
+                : usageTotalTokens ?? estimateTokens(collectedText);
+            const model = contextDebugModel || routing.model || finalModel || "unknown";
 
             handlers.onComplete({
-              model: finalModel || this.settings.model || "unknown",
+              model,
+              provider: contextDebugProvider || routing.provider || inferProvider(model),
+              promptTokens,
+              completionTokens,
               tokensUsed: totalTokens,
             });
             resolve();
@@ -732,6 +1085,13 @@ export class HermesInterface {
       req.end();
     });
   }
+}
+
+function inferProvider(model: unknown): string | undefined {
+  if (typeof model === "string" && model.includes("/")) {
+    return model.split("/", 1)[0];
+  }
+  return undefined;
 }
 
 // Kept for backwards compatibility with existing imports.

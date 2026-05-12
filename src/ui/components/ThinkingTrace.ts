@@ -18,21 +18,31 @@ export class ThinkingTrace extends Component {
   private thinking: string;
   private streaming: boolean;
   private streamStart: number;
+  private messageId: string;
 
   constructor(
     container: HTMLElement,
     metadata: MessageMetadata,
     thinking: string,
     streaming: boolean,
-    streamStart: number
+    streamStart: number,
+    messageId: string
   ) {
     super();
     this.metadata = metadata;
     this.thinking = thinking;
     this.streaming = streaming;
     this.streamStart = streamStart;
+    this.messageId = messageId;
     this.containerEl = container.createDiv({ cls: "obsidian-agents-thinking-trace" });
     this.build();
+    // MessageBubble rebuilds the wrapper on every streaming update, so a brand
+    // new trace is created while the old drawer (hosted on the view root) is
+    // still open. Adopt it on construction so the latest data shows up without
+    // the user needing to close/reopen — but only if the drawer belongs to
+    // this message. Otherwise a streaming message would stomp on a drawer the
+    // user opened for a previous message.
+    this.refreshOpenDrawer();
   }
 
   private build(): void {
@@ -65,10 +75,11 @@ export class ThinkingTrace extends Component {
       : this.metadata.durationMs;
 
     const timeText = elapsedMs != null ? this.formatDuration(elapsedMs) : null;
-    const toolCount = this.metadata.toolCalls?.length ?? 0;
+    const toolCount = this.metadata.toolCalls?.length ?? this.metadata.traceRef?.toolCallCount ?? 0;
     const toolSuffix = toolCount > 0
       ? ` · ${toolCount} tool${toolCount > 1 ? "s" : ""}`
       : "";
+    const hasArchive = Boolean(this.metadata.traceRef);
 
     if (this.streaming) {
       const base = timeText ? `Thinking ${timeText}` : "Thinking…";
@@ -76,7 +87,7 @@ export class ThinkingTrace extends Component {
       this.headerEl.addClass("obsidian-agents-thinking-pill-streaming");
     } else {
       this.headerEl.removeClass("obsidian-agents-thinking-pill-streaming");
-      const base = timeText ? `Thought for ${timeText}` : "Reasoning";
+      const base = timeText ? `Thought for ${timeText}` : hasArchive ? "Archived activity" : "Reasoning";
       this.labelEl.setText(base + toolSuffix);
     }
   }
@@ -100,11 +111,50 @@ export class ThinkingTrace extends Component {
     if (existing) existing.remove();
 
     const drawer = host.createDiv({ cls: "obsidian-agents-thinking-drawer" });
+    drawer.setAttribute("data-message-id", this.messageId);
 
     // Resize handle on the left edge. Dragging past the snap threshold makes
     // the drawer fill the entire view (chat hidden).
     const resizer = drawer.createDiv({ cls: "obsidian-agents-thinking-drawer-resizer" });
     this.wireResizer(resizer, drawer, host);
+
+    this.renderDrawerContents(drawer);
+
+    // Escape/close handlers live on the drawer root so they survive body re-renders.
+    const dismiss = () => {
+      drawer.remove();
+      document.removeEventListener("keydown", onKey);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") dismiss();
+    };
+    drawer.addEventListener("click", (e) => {
+      const target = e.target as HTMLElement | null;
+      if (target?.closest(".obsidian-agents-thinking-drawer-close")) dismiss();
+    });
+    document.addEventListener("keydown", onKey);
+  }
+
+  /**
+   * Renders (or re-renders) the drawer's inner contents. Split out so that
+   * streaming updates can refresh an already-open drawer as new tool calls and
+   * reasoning chunks arrive, instead of showing a stale snapshot.
+   */
+  private renderDrawerContents(drawer: HTMLElement): void {
+    // Preserve the user's scroll position across streaming re-renders. Without
+    // this, every tick wipes the body and the scrollTop resets to 0 — making
+    // it impossible to scroll down while the trace is still streaming.
+    const prevBody = drawer.querySelector(
+      ":scope > .obsidian-agents-thinking-drawer-body"
+    ) as HTMLElement | null;
+    const prevScroll = prevBody?.scrollTop ?? 0;
+
+    // Preserve user-dragged width and fullscreen state across re-renders —
+    // only the body changes, the drawer frame itself stays put.
+    const existingResizer = drawer.querySelector(":scope > .obsidian-agents-thinking-drawer-resizer");
+    Array.from(drawer.children).forEach((child) => {
+      if (child !== existingResizer) child.remove();
+    });
 
     const header = drawer.createDiv({ cls: "obsidian-agents-thinking-drawer-header" });
 
@@ -115,8 +165,7 @@ export class ThinkingTrace extends Component {
       ? Date.now() - this.streamStart
       : this.metadata.durationMs;
     if (elapsedMs != null) {
-      const dot = header.createSpan({ cls: "obsidian-agents-thinking-drawer-sep", text: "·" });
-      void dot;
+      header.createSpan({ cls: "obsidian-agents-thinking-drawer-sep", text: "·" });
       const time = header.createDiv({ cls: "obsidian-agents-thinking-drawer-time" });
       time.setText(this.formatDuration(elapsedMs));
     }
@@ -142,46 +191,67 @@ export class ThinkingTrace extends Component {
     const toolCalls = this.metadata.toolCalls ?? [];
 
     if (toolCalls.length === 0 && !this.thinking) {
+      if (this.metadata.traceRef) {
+        body.createDiv({
+          cls: "obsidian-agents-thinking-drawer-section-heading",
+          text: "Archived activity",
+        });
+        const archived = body.createDiv({ cls: "obsidian-agents-thinking-empty" });
+        archived.setText(`Full trace archived at ${this.metadata.traceRef.path}`);
+        body.scrollTop = prevScroll;
+        return;
+      }
       body.createDiv({
         cls: "obsidian-agents-thinking-empty",
-        text: "No reasoning was emitted for this message.",
+        text: this.streaming ? "Thinking…" : "No reasoning was emitted for this message.",
       });
-    } else {
-      body.createDiv({
-        cls: "obsidian-agents-thinking-drawer-section-heading",
-        text: "Thinking",
-      });
-      const timeline = body.createDiv({ cls: "obsidian-agents-thinking-timeline" });
+      body.scrollTop = prevScroll;
+      return;
+    }
 
-      // Interleave reasoning paragraphs (dot rows) with tool calls (icon rows),
-      // mirroring the ChatGPT Activity panel pattern.
-      const reasoningChunks = this.splitReasoning(this.thinking);
-      const toolCount = toolCalls.length;
-      const chunkCount = reasoningChunks.length;
-      const total = Math.max(toolCount, chunkCount);
+    body.createDiv({
+      cls: "obsidian-agents-thinking-drawer-section-heading",
+      text: "Thinking",
+    });
+    const timeline = body.createDiv({ cls: "obsidian-agents-thinking-timeline" });
 
-      // Alternate: reasoning chunk, then tool call, repeating. This is a heuristic
-      // since the upstream gateway doesn't interleave the streams — best we can do
-      // without per-event timestamps is show them paired.
-      for (let i = 0; i < total; i++) {
-        if (i < chunkCount && reasoningChunks[i]) {
-          this.renderReasoningRow(timeline, reasoningChunks[i]);
-        }
-        if (i < toolCount) {
-          this.renderToolRow(timeline, toolCalls[i]);
-        }
+    // Interleave reasoning paragraphs (dot rows) with tool calls (icon rows),
+    // mirroring the ChatGPT Activity panel pattern.
+    const reasoningChunks = this.splitReasoning(this.thinking);
+    const toolCount = toolCalls.length;
+    const chunkCount = reasoningChunks.length;
+    const total = Math.max(toolCount, chunkCount);
+
+    for (let i = 0; i < total; i++) {
+      if (i < chunkCount && reasoningChunks[i]) {
+        this.renderReasoningRow(timeline, reasoningChunks[i]);
+      }
+      if (i < toolCount) {
+        this.renderToolRow(timeline, toolCalls[i]);
       }
     }
 
-    const dismiss = () => {
-      drawer.remove();
-      document.removeEventListener("keydown", onKey);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") dismiss();
-    };
-    closeBtn.addEventListener("click", dismiss);
-    document.addEventListener("keydown", onKey);
+    body.scrollTop = prevScroll;
+  }
+
+  /**
+   * Finds the open drawer hosted on the chat view root (if any) and repaints
+   * its contents — but only if the drawer belongs to THIS trace's message.
+   * MessageBubble rebuilds its wrapper on every streaming update, which
+   * destroys the old ThinkingTrace instance. The drawer survives on the view
+   * root so the freshly-built trace can adopt and refresh it. Scoping by
+   * messageId ensures a streaming message doesn't overwrite a drawer the user
+   * opened to inspect a previous message's trace.
+   */
+  private refreshOpenDrawer(): void {
+    const viewRoot = this.containerEl.closest(".obsidian-agents-view") as HTMLElement | null;
+    const host: HTMLElement = viewRoot ?? document.body;
+    const drawer = host.querySelector(
+      ":scope > .obsidian-agents-thinking-drawer"
+    ) as HTMLElement | null;
+    if (!drawer) return;
+    if (drawer.getAttribute("data-message-id") !== this.messageId) return;
+    this.renderDrawerContents(drawer);
   }
 
   private wireResizer(
@@ -242,12 +312,27 @@ export class ThinkingTrace extends Component {
   }
 
   private splitReasoning(thinking: string): string[] {
-    if (!thinking) return [];
+    const cleaned = this.sanitizeReasoning(thinking);
+    if (!cleaned) return [];
     // Split on double-newline paragraphs; drop empties.
-    return thinking
+    return cleaned
       .split(/\n{2,}/)
       .map((s) => s.trim())
       .filter((s) => s.length > 0);
+  }
+
+  private sanitizeReasoning(thinking: string): string {
+    if (!thinking) return "";
+    return thinking
+      // Backend/provider variants sometimes leak as literal markup into
+      // reasoning fields. The drawer is already the reasoning container, so
+      // showing the wrapper tags just looks like corrupted UI.
+      .replace(/<\/?(?:thinking|think|reasoning|thought|REASONING_SCRATCHPAD)>/gi, "")
+      // Older Hermes compaction ledgers are useful to the model, not to the
+      // activity timeline. If one leaks into a reasoning delta, remove the
+      // marker line instead of letting it masquerade as an activity row/icon.
+      .replace(/^\s*\[MODEL-SUMMARIZED TRACE[^\n]*\n?/gim, "")
+      .trim();
   }
 
   private renderReasoningRow(host: HTMLElement, text: string): void {
@@ -320,11 +405,14 @@ export class ThinkingTrace extends Component {
     this.thinking = thinking;
     this.streaming = streaming;
     this.renderLabel();
+    this.refreshOpenDrawer();
   }
 
 
   /** Called every tick while streaming to update elapsed time. */
   tickElapsed(): void {
-    if (this.streaming) this.renderLabel();
+    if (!this.streaming) return;
+    this.renderLabel();
+    this.refreshOpenDrawer();
   }
 }

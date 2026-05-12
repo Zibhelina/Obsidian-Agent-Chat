@@ -9,8 +9,11 @@ import {
 import {
   getHermesConfigPath,
   hermesConfigExists,
+  readActiveModel,
   readApprovalMode,
+  readReasoningEffort,
   writeApprovalMode,
+  writeReasoningEffort,
 } from "./lib/hermesConfig";
 import type { ApprovalMode } from "./types";
 import {
@@ -22,17 +25,66 @@ import {
   PermissionDecision,
   StreamHandlers,
   SessionFolder,
+  ContextItem,
+  ContextBundle,
 } from "./types";
 import { loadSettings, saveSettings } from "./settings";
 import { loadSessions, saveSessions, createSession, createFolder } from "./storage";
 import { ChatView, CHAT_VIEW_TYPE } from "./ui/ChatView";
 import { HermesInterface } from "./hermes";
-import { resolveMentions, injectContextIntoMessage } from "./features/mentions";
+import { buildContextBundle, renderContextBundleForPrompt } from "./features/contextBundle";
 import { generateId } from "./lib/id";
 import { ChannelRegistry } from "./callback/channels";
 import type { DeliveryContext } from "./callback/channels/types";
 import { startCallbackServer, type CallbackServer } from "./callback/server";
 import type { DeliveryPayload } from "./types";
+import { hasTracePayload } from "./traceArtifacts";
+
+function stripRuntimeAttachment(attachment: Attachment): Attachment {
+  const { originalBytes: _originalBytes, ...rest } = attachment;
+  return rest;
+}
+
+function buildStoredAttachments(
+  attachments: Attachment[],
+  bundleItems: ContextItem[]
+): Attachment[] {
+  const attachmentItems = (bundleItems ?? []).filter((item) => item.source !== "mention");
+  return attachments.map((attachment, index) => {
+    const item = attachmentItems[index];
+    const durablePath =
+      item?.original?.vaultPath ??
+      item?.vaultPath ??
+      item?.derivatives?.[0]?.vaultPath ??
+      attachment.path;
+    const stored: Attachment = {
+      ...stripRuntimeAttachment(attachment),
+      name: item?.name ?? attachment.name,
+      path: durablePath,
+      mime: item?.mime ?? attachment.mime,
+      sizeBytes: item?.sizeBytes ?? attachment.sizeBytes,
+    };
+    if (item?.original?.vaultPath || item?.vaultPath) {
+      delete stored.dataUrl;
+    }
+    return stored;
+  });
+}
+
+function hasPersistedAttachmentBlob(message: ChatMessage): boolean {
+  return (message.attachments ?? []).some(
+    (attachment) => typeof attachment.dataUrl === "string" && attachment.dataUrl.length > 0
+  );
+}
+
+function contextBundleRefFromBundle(bundle: ContextBundle | undefined) {
+  if (!bundle?.bundlePath) return undefined;
+  return {
+    path: bundle.bundlePath,
+    itemCount: bundle.items.length,
+    createdAt: bundle.createdAt,
+  };
+}
 
 export default class ObsidianAgentsPlugin extends Plugin {
   settings!: ObsidianAgentsSettings;
@@ -40,7 +92,7 @@ export default class ObsidianAgentsPlugin extends Plugin {
   foldersList: SessionFolder[] = [];
   activeSessionId: string | null = null;
   private hermes: HermesInterface | null = null;
-  private chatView: ChatView | null = null;
+  chatView: ChatView | null = null;
   private pendingPermissions = new Map<
     string,
     { resolve: (d: PermissionDecision) => void; reject: (e: Error) => void }
@@ -65,8 +117,22 @@ export default class ObsidianAgentsPlugin extends Plugin {
         this.settings.approvalMode = onDisk;
         await this.savePluginSettings();
       }
+      const reasoningOnDisk = readReasoningEffort();
+      if (reasoningOnDisk && reasoningOnDisk !== this.settings.effortLevel) {
+        this.settings.effortLevel = reasoningOnDisk;
+        await this.savePluginSettings();
+      }
     } catch {
       /* config file unreadable — keep the stored value */
+    }
+    // The composer model picker writes ~/.hermes/config.yaml, and the Hermes
+    // gateway routes from that file. Older plugin settings stored a separate
+    // model slug; keeping it around makes the UI/reporting claim the wrong
+    // model even when Hermes is routing correctly.
+    if (this.settings.provider || this.settings.model !== "auto") {
+      this.settings.provider = "";
+      this.settings.model = "auto";
+      await this.savePluginSettings();
     }
     this.hermes = new HermesInterface(this.settings);
     await this.loadSessionsData();
@@ -222,15 +288,11 @@ export default class ObsidianAgentsPlugin extends Plugin {
     return this.settings.callbackToken;
   }
 
-  syncActiveViewSettings(): void {
-    this.chatView?.syncSettings();
-  }
-
   async activateView(): Promise<void> {
     const { workspace } = this.app;
-    let leaf: WorkspaceLeaf | null | undefined = workspace.getLeavesOfType(CHAT_VIEW_TYPE)[0];
+    let leaf = workspace.getLeavesOfType(CHAT_VIEW_TYPE)[0] as WorkspaceLeaf | undefined;
     if (!leaf) {
-      leaf = workspace.getRightLeaf(false);
+      leaf = workspace.getRightLeaf(false) ?? undefined;
       if (!leaf) return;
       await leaf.setViewState({ type: CHAT_VIEW_TYPE, active: true });
     }
@@ -253,9 +315,63 @@ export default class ObsidianAgentsPlugin extends Plugin {
     // existed is treated as already-read up to its latest activity. Without
     // this, every historical chat would light up with the unread dot on
     // first launch of a build that has this feature.
+    let shouldResave = false;
     for (const s of this.sessions) {
-      if (s.lastReadAt == null) s.lastReadAt = s.updatedAt;
+      if (s.lastReadAt == null) {
+        s.lastReadAt = s.updatedAt;
+        shouldResave = true;
+      }
+      if (s.messages.some((m) => hasTracePayload(m))) {
+        shouldResave = true;
+      }
     }
+    if (await this.migrateLegacyAttachmentBlobs()) {
+      shouldResave = true;
+    }
+    if (shouldResave) await this.saveSessionsData();
+  }
+
+  private async migrateLegacyAttachmentBlobs(): Promise<boolean> {
+    let changed = false;
+    for (const session of this.sessions) {
+      for (const message of session.messages) {
+        if (!hasPersistedAttachmentBlob(message)) continue;
+        try {
+          let bundle = message.contextBundle;
+          if (!bundle || !bundle.items.some((item) => item.source !== "mention")) {
+            const result = await buildContextBundle({
+              app: this.app,
+              sessionId: session.id,
+              messageId: message.id,
+              text: message.content,
+              attachments: message.attachments,
+            });
+            bundle = result.bundle;
+            if (bundle.items.length > 0) {
+              message.contextBundle = bundle;
+              message.contextBundleRef = contextBundleRefFromBundle(bundle);
+            }
+          } else if (!message.contextBundleRef) {
+            message.contextBundleRef = contextBundleRefFromBundle(bundle);
+          }
+
+          const storedAttachments = buildStoredAttachments(
+            message.attachments,
+            bundle?.items ?? []
+          );
+          const strippedBlob = message.attachments.some(
+            (attachment, index) => attachment.dataUrl && !storedAttachments[index]?.dataUrl
+          );
+          message.attachments = storedAttachments;
+          if (strippedBlob) {
+            changed = true;
+          }
+        } catch (error) {
+          console.error("[obsidian-agents] failed to migrate attachment blobs", error);
+        }
+      }
+    }
+    return changed;
   }
 
   async saveSessionsData(): Promise<void> {
@@ -402,6 +518,38 @@ export default class ObsidianAgentsPlugin extends Plugin {
     this.chatView?.renderSidebar(this.sessions, this.foldersList, this.activeSessionId);
   }
 
+  branchSession(sessionId: string, messageId: string): void {
+    const parent = this.getSession(sessionId);
+    if (!parent) return;
+    const idx = parent.messages.findIndex((m) => m.id === messageId);
+    if (idx === -1) return;
+
+    const now = Date.now();
+    const branched: ChatSession = {
+      id: generateId(),
+      name: `Branch: ${parent.name}`,
+      folderId: parent.folderId,
+      messages: parent.messages.slice(0, idx + 1).map((m) => ({
+        ...m,
+        id: generateId(),
+        attachments: m.attachments ? [...m.attachments] : [],
+        metadata: m.metadata ? { ...m.metadata } : undefined,
+        skillIds: m.skillIds ? [...m.skillIds] : undefined,
+      })),
+      createdAt: now,
+      updatedAt: now,
+      model: parent.model,
+      lastReadAt: now,
+    };
+
+    this.sessions.push(branched);
+    this.activeSessionId = branched.id;
+    this.saveSessionsData();
+    this.chatView?.loadSession(branched);
+    this.chatView?.renderSidebar(this.sessions, this.foldersList, this.activeSessionId);
+    new Notice(`Branched into "${branched.name}"`);
+  }
+
   isStreaming(sessionId: string): boolean {
     return this.activeStreams.has(sessionId);
   }
@@ -455,25 +603,48 @@ export default class ObsidianAgentsPlugin extends Plugin {
     const session = this.getSession(sessionId);
     if (!session) return null;
 
+    const userMsgId = generateId();
+
+    // Build metadata-first context before storing the message so persisted
+    // history can keep durable file refs instead of replaying base64 blobs.
+    const contextResult = await buildContextBundle({
+      app: this.app,
+      sessionId,
+      messageId: userMsgId,
+      text,
+      attachments,
+    });
+
+    const storedAttachments = buildStoredAttachments(attachments, contextResult.bundle.items);
+    const contextBundleRef = contextResult.bundle.bundlePath
+      ? {
+          path: contextResult.bundle.bundlePath,
+          itemCount: contextResult.bundle.items.length,
+          createdAt: contextResult.bundle.createdAt,
+        }
+      : undefined;
+
     // Build user message — content stays as the raw user text for display.
-    // File context is injected separately into the API payload only.
+    // Attachment bytes are stored in agent-vault and referenced by path.
     const userMsg: ChatMessage = {
-      id: generateId(),
+      id: userMsgId,
       role: "user",
       content: text,
-      attachments,
+      attachments: storedAttachments,
       timestamp: Date.now(),
       skillIds: skillIds.length > 0 ? skillIds : undefined,
+      contextBundle: contextResult.bundle.items.length > 0 ? contextResult.bundle : undefined,
+      contextBundleRef,
     };
 
-    // Resolve @mentions → build an API-only version with file bodies injected.
-    // The stored message always keeps the original text so the bubble shows
-    // what the user actually typed, not a wall of file content.
-    const { text: resolvedText, context } = await resolveMentions(text, this.app);
-    let apiUserMsg: ChatMessage = { ...userMsg, content: resolvedText };
-    if (Object.keys(context).length > 0) {
-      apiUserMsg = injectContextIntoMessage(apiUserMsg, context);
-    }
+    // Build an API-only message. Only this latest turn may carry optimized
+    // multimodal derivatives; historical messages stay reference-only.
+    const apiUserMsg: ChatMessage = {
+      ...userMsg,
+      content: renderContextBundleForPrompt(contextResult.text, contextResult.bundle),
+      attachments: contextResult.apiAttachments,
+      contextBundle: contextResult.bundle,
+    };
 
     // Auto-name a fresh session from the first user message
     const wasEmpty = !session.messages.some((m) => m.role === "user");
@@ -512,6 +683,13 @@ export default class ObsidianAgentsPlugin extends Plugin {
 
     // Stream handlers that update session + UI
     const wrappedHandlers: StreamHandlers = {
+      onContextDebug: (snapshot) => {
+        agentMsg.metadata = {
+          ...agentMsg.metadata,
+          contextDebug: snapshot,
+        };
+        handlers.onContextDebug?.(snapshot);
+      },
       onToken: (token: string) => {
         agentMsg.content += token;
         handlers.onToken(token);
@@ -546,7 +724,7 @@ export default class ObsidianAgentsPlugin extends Plugin {
         // selectSession().
         this.activeStreams.delete(sessionId);
         this.saveSessionsData();
-        handlers.onComplete(metadata);
+        handlers.onComplete({ ...metadata, durationMs });
         // Refresh the sidebar so the spinner disappears and (if off-screen)
         // the unread dot appears for this session.
         this.chatView?.renderSidebar(this.sessions, this.foldersList, this.activeSessionId);
@@ -619,35 +797,37 @@ class ObsidianAgentsSettingTab extends PluginSettingTab {
           .onChange(async (value) => {
             this.plugin.settings.agentName = value || "Hermes";
             await this.plugin.savePluginSettings();
-            this.plugin.syncActiveViewSettings();
+            this.plugin.chatView?.syncSettings();
           })
       );
 
-    new Setting(containerEl)
-      .setName("Model")
-      .setDesc("The AI model used by Hermes")
-      .addText((text) =>
-        text
-          .setPlaceholder("auto")
-          .setValue(this.plugin.settings.model)
-          .onChange(async (value) => {
-            this.plugin.settings.model = value || "auto";
-            await this.plugin.savePluginSettings();
-          })
-      );
+    this.renderProviderAndModelSettings(containerEl);
 
     new Setting(containerEl)
       .setName("Effort level")
-      .setDesc("How much reasoning effort the agent should apply")
+      .setDesc("Reasoning effort saved to ~/.hermes/config.yaml and applied on the next message")
       .addDropdown((drop) =>
         drop
+          .addOption("minimal", "Minimal")
           .addOption("low", "Low")
           .addOption("medium", "Medium")
           .addOption("high", "High")
           .setValue(this.plugin.settings.effortLevel)
           .onChange(async (value) => {
-            this.plugin.settings.effortLevel = value as "low" | "medium" | "high";
-            await this.plugin.savePluginSettings();
+            const effort = value as ObsidianAgentsSettings["effortLevel"];
+            const previous = this.plugin.settings.effortLevel;
+            this.plugin.settings.effortLevel = effort;
+            try {
+              writeReasoningEffort(effort);
+              await this.plugin.savePluginSettings();
+              this.plugin.chatView?.syncSettings();
+              new Notice(`Reasoning effort set to "${effort}". Applies to the next message.`);
+            } catch (err) {
+              this.plugin.settings.effortLevel = previous;
+              drop.setValue(previous);
+              const msg = err instanceof Error ? err.message : String(err);
+              new Notice(`Failed to write Hermes config: ${msg}`);
+            }
           })
       );
 
@@ -841,5 +1021,25 @@ class ObsidianAgentsSettingTab extends PluginSettingTab {
           })
       );
 
+  }
+
+  private renderProviderAndModelSettings(containerEl: HTMLElement): void {
+    const active = readActiveModel();
+    const value = `${active.provider || "gateway default"} / ${active.model || "gateway default"}`;
+    const desc = active.baseUrl
+      ? `Routing is controlled by ${getHermesConfigPath()}. Base URL: ${active.baseUrl}`
+      : `Routing is controlled by ${getHermesConfigPath()}. Use the model picker in the chat composer to change it.`;
+
+    new Setting(containerEl)
+      .setName("Active Hermes model")
+      .setDesc(desc)
+      .addText((text) => text.setValue(value).setDisabled(true))
+      .addButton((btn) =>
+        btn
+          .setButtonText("Reload")
+          .onClick(() => {
+            this.display();
+          })
+      );
   }
 }

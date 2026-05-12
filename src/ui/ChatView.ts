@@ -1,4 +1,4 @@
-import { ItemView, WorkspaceLeaf, Component } from "obsidian";
+import { ItemView, WorkspaceLeaf, Component, Notice } from "obsidian";
 import {
   ChatSession,
   ChatMessage,
@@ -17,13 +17,22 @@ import { PermissionWidget } from "./components/PermissionWidget";
 import { MentionPopover } from "./components/MentionPopover";
 import { ReplyHandle } from "./components/ReplyHandle";
 import { TermPanel } from "./components/TermPanel";
+import { ChatNavigator } from "./components/ChatNavigator";
+import { SessionStatsBar } from "./components/SessionStatsBar";
 import { generateId } from "../lib/id";
+import { writeReasoningEffort } from "../lib/hermesConfig";
 
 export const CHAT_VIEW_TYPE = "obsidian-agents";
 
 export interface IObsidianAgentsPlugin {
   app: any;
-  settings: { agentName: string; model: string; contextWindow: number };
+  settings: {
+    agentName: string;
+    model: string;
+    contextWindow: number;
+    effortLevel: "minimal" | "low" | "medium" | "high";
+  };
+  savePluginSettings: () => Promise<void>;
   sessions: ChatSession[];
   foldersList: SessionFolder[];
   activeSessionId: string | null;
@@ -37,6 +46,7 @@ export interface IObsidianAgentsPlugin {
   renameFolder(id: string, name: string): void;
   toggleFolderCollapse(id: string): void;
   selectSession(id: string): void;
+  branchSession(sessionId: string, messageId: string): void;
   sendMessage(
     sessionId: string,
     text: string,
@@ -62,6 +72,8 @@ export class ChatView extends ItemView {
   private statusBar: StatusBar | null = null;
   private replyHandle: ReplyHandle | null = null;
   private termPanel: TermPanel | null = null;
+  private chatNavigator: ChatNavigator | null = null;
+  private sessionStats: SessionStatsBar | null = null;
 
   private currentSessionId: string | null = null;
   // Steering queue: when the user sends a message while a turn is still
@@ -114,6 +126,23 @@ export class ChatView extends ItemView {
       { passive: false }
     );
 
+    // ArrowLeft/ArrowRight on focused non-editable elements translates the
+    // chat column horizontally — same root cause as the trackpad pan above.
+    // Block the default scroll behaviour unless focus is in a text field.
+    container.addEventListener("keydown", (e: KeyboardEvent) => {
+      if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName;
+      if (
+        tag === "INPUT" ||
+        tag === "TEXTAREA" ||
+        target?.isContentEditable
+      ) {
+        return;
+      }
+      e.preventDefault();
+    });
+
     // Sidebar
     this.sidebar = new Sidebar(
       container,
@@ -138,8 +167,14 @@ export class ChatView extends ItemView {
     // Main chat area
     const chatPanel = container.createDiv({ cls: "obsidian-agents-chat-panel" });
 
+    this.sessionStats = new SessionStatsBar(chatPanel);
+    this.addChild(this.sessionStats);
+
     this.messageList = new MessageList(chatPanel);
     this.addChild(this.messageList);
+
+    this.chatNavigator = new ChatNavigator(chatPanel, this.messageList);
+    this.addChild(this.chatNavigator);
 
     this.composer = new Composer(
       chatPanel,
@@ -151,6 +186,28 @@ export class ChatView extends ItemView {
       }
     );
     this.composer.setApp(this.plugin.app);
+    this.composer.setModelPickerHandlers({
+      getEffort: () => this.plugin.settings.effortLevel,
+      setEffort: async (effort) => {
+        const previous = this.plugin.settings.effortLevel;
+        this.plugin.settings.effortLevel = effort;
+        try {
+          writeReasoningEffort(effort);
+          await this.plugin.savePluginSettings();
+          new Notice(`Reasoning effort set to "${effort}". Applies to the next message.`);
+        } catch (err) {
+          this.plugin.settings.effortLevel = previous;
+          const msg = err instanceof Error ? err.message : String(err);
+          new Notice(`Failed to write Hermes config: ${msg}`);
+          throw err;
+        }
+      },
+      onChanged: () => {
+        // The Hermes gateway re-reads ~/.hermes/config.yaml on every
+        // chat-completion request, so picking a new model or effort level
+        // takes effect on the next send — no gateway restart needed.
+      },
+    });
     this.addChild(this.composer);
 
     // When the composer flips to expanded mode, add a root class so CSS
@@ -160,10 +217,7 @@ export class ChatView extends ItemView {
       container.toggleClass("obsidian-agents-composer-docked", expanded);
     });
 
-    const mentionPopover = new MentionPopover(
-      this.plugin.app,
-      () => {}
-    );
+    const mentionPopover = new MentionPopover(this.plugin.app);
     this.composer.setMentionPopover(mentionPopover);
 
     // Reply-to-selection floating button
@@ -175,6 +229,16 @@ export class ChatView extends ItemView {
     container.addEventListener("obsidian-agents:reply", (e: Event) => {
       const quote = (e as CustomEvent).detail as string;
       if (quote) this.composer?.setReplyQuote(quote);
+    });
+
+    // Branch button: fork the conversation up to a given agent message into
+    // a fresh chat so the user can dig into a tangent without disrupting
+    // the main thread.
+    container.addEventListener("obsidian-agents:branch", (e: Event) => {
+      const messageId = (e as CustomEvent).detail as string;
+      if (messageId && this.currentSessionId) {
+        this.plugin.branchSession(this.currentSessionId, messageId);
+      }
     });
 
     // Term detail panel — slides in from the right when a user clicks an
@@ -214,6 +278,7 @@ export class ChatView extends ItemView {
 
   syncSettings(): void {
     this.sidebar?.setAgentName(this.plugin.settings.agentName);
+    this.composer?.refreshModelPicker();
   }
 
   loadSession(session: ChatSession): void {
@@ -237,6 +302,7 @@ export class ChatView extends ItemView {
     }
     this.composer?.setStreaming(this.plugin.isStreaming(session.id));
     this.messageList?.scrollToBottom();
+    this.sessionStats?.render(session);
     this.updateEmptyState(session);
   }
 
@@ -350,7 +416,21 @@ export class ChatView extends ItemView {
           this.messageList?.addMessage({ ...agentMsg }, this.plugin);
           this.messageList?.setStreaming(agentMsg.id, true);
           this.messageList?.scrollToBottom();
+          this.sessionStats?.render(this.plugin.sessions.find((s) => s.id === sessionId));
           this.composer?.setStreaming(true);
+        });
+      },
+      onContextDebug: (snapshot) => {
+        onUI(() => {
+          if (!agentMsgId || !this.messageList) return;
+          this.messageList.updateMessage(
+            agentMsgId,
+            (msg) => ({
+              ...msg,
+              metadata: { ...msg.metadata, contextDebug: snapshot },
+            }),
+            this.plugin
+          );
         });
       },
       onToken: (token: string) => {
@@ -434,6 +514,7 @@ export class ChatView extends ItemView {
               this.plugin
             );
           }
+          this.sessionStats?.render(this.plugin.sessions.find((s) => s.id === sessionId));
           this.composer?.setStreaming(false);
         });
         this.flushSteeringQueue(sessionId);
@@ -448,6 +529,7 @@ export class ChatView extends ItemView {
               this.plugin
             );
           }
+          this.sessionStats?.render(this.plugin.sessions.find((s) => s.id === sessionId));
           this.composer?.setStreaming(false);
         });
         // Don't chain steering messages on top of a failed turn — the user

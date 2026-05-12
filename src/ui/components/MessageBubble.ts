@@ -1,8 +1,10 @@
-import { Component, Notice, setIcon } from "obsidian";
-import { ChatMessage, LayoutBlock } from "../../types";
+import { Component, Notice, setIcon, TFile } from "obsidian";
+import { Attachment, ChatMessage, LayoutBlock } from "../../types";
 import { ThinkingTrace } from "./ThinkingTrace";
 import { LayoutEngine } from "./LayoutEngine";
 import { getSkill } from "../../features/commands";
+import { ContextDebugModal } from "./ContextDebugModal";
+import { parseMentionOccurrences } from "../../features/mentions";
 
 export class MessageBubble extends Component {
   private wrapper: HTMLElement;
@@ -25,6 +27,10 @@ export class MessageBubble extends Component {
       cls: `obsidian-agents-message-wrapper ${
         message.role === "user" ? "obsidian-agents-message-wrapper-user" : "obsidian-agents-message-wrapper-agent"
       }`,
+      attr: {
+        "data-message-id": message.id,
+        "data-message-role": message.role,
+      },
     });
 
     this.bubble = this.wrapper.createDiv({
@@ -54,7 +60,8 @@ export class MessageBubble extends Component {
         meta,
         thinking,
         this.isStreaming,
-        this.streamStart
+        this.streamStart,
+        this.message.id
       );
       this.addChild(this.trace);
     }
@@ -118,9 +125,7 @@ export class MessageBubble extends Component {
 
     if (isUser) {
       // Strip @[name](path) mention tokens — show only the user's prose.
-      const displayText = this.message.content
-        .replace(/@\[[^\]]*\]\([^)]*\)/g, "")
-        .trim();
+      const displayText = this.stripMentionTokens(this.message.content).trim();
       LayoutEngine.render(
         this.contentEl,
         displayText || this.message.content,
@@ -152,21 +157,24 @@ export class MessageBubble extends Component {
 
     // User attachments rendered ABOVE the bubble, outside of it.
     if (isUser && this.message.attachments?.length) {
-      const images = this.message.attachments.filter((a) => a.type === "image" && a.dataUrl);
-      const files = this.message.attachments.filter((a) => a.type !== "image" || !a.dataUrl);
+      const imageAttachments = this.message.attachments
+        .map((attachment) => ({ attachment, src: this.attachmentImageSrc(attachment) }))
+        .filter((entry): entry is { attachment: Attachment; src: string } => Boolean(entry.src));
+      const imageIds = new Set(imageAttachments.map((entry) => entry.attachment.id));
+      const files = this.message.attachments.filter((a) => !imageIds.has(a.id));
 
-      if (images.length > 0) {
+      if (imageAttachments.length > 0) {
         const imgContainer = document.createElement("div");
         imgContainer.className = "obsidian-agents-user-attachments obsidian-agents-user-attachments-images";
         // Insert before the bubble so images sit above the text bubble
         this.wrapper.insertBefore(imgContainer, this.bubble);
 
-        for (const att of images) {
+        for (const { attachment: att, src } of imageAttachments) {
           const img = imgContainer.createEl("img", { cls: "obsidian-agents-user-attachment-img" });
-          img.src = att.dataUrl!;
+          img.src = src;
           img.alt = att.name;
           img.style.cursor = "zoom-in";
-          img.addEventListener("click", () => this.openLightbox(att.dataUrl!, att.name));
+          img.addEventListener("click", () => this.openLightbox(src, att.name));
         }
       }
 
@@ -230,21 +238,80 @@ export class MessageBubble extends Component {
           new CustomEvent("obsidian-agents:reply", { detail: quote, bubbles: true })
         );
       });
+
+      const branchBtn = row.createEl("button", {
+        cls: "obsidian-agents-message-action-btn",
+        attr: { "aria-label": "Branch in new chat" },
+      });
+      setIcon(branchBtn, "git-branch");
+      branchBtn.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this.wrapper.dispatchEvent(
+          new CustomEvent("obsidian-agents:branch", {
+            detail: this.message.id,
+            bubbles: true,
+          })
+        );
+      });
+
+      const contextDebug = this.message.metadata?.contextDebug;
+      if (contextDebug) {
+        const debugBtn = row.createEl("button", {
+          cls: "obsidian-agents-message-action-btn",
+          attr: { "aria-label": "Debug context", title: "Debug context" },
+        });
+        setIcon(debugBtn, "bug");
+        debugBtn.addEventListener("click", (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          const session = this.plugin.sessions?.find((s: { messages?: ChatMessage[] }) =>
+            s.messages?.some((m) => m.id === this.message.id)
+          );
+          new ContextDebugModal(this.plugin.app, contextDebug, this.message, session).open();
+        });
+      }
     }
   }
 
   private parseMentions(content: string): { name: string; path: string }[] {
     const out: { name: string; path: string }[] = [];
     const seen = new Set<string>();
-    const re = /@\[([^\]]*)\]\(([^)]*)\)/g;
-    let match: RegExpExecArray | null;
-    while ((match = re.exec(content)) !== null) {
-      const path = match[2];
+    for (const mention of parseMentionOccurrences(content)) {
+      if (content[mention.tokenStart + 1] !== "[") continue;
+      const path = mention.path;
       if (seen.has(path)) continue;
       seen.add(path);
-      out.push({ name: match[1] || path, path });
+      out.push({ name: mention.label || path, path });
     }
     return out;
+  }
+
+  private stripMentionTokens(content: string): string {
+    const mentions = parseMentionOccurrences(content).filter(
+      (mention) => content[mention.tokenStart + 1] === "["
+    );
+    if (mentions.length === 0) return content;
+    let out = "";
+    let cursor = 0;
+    for (const mention of mentions) {
+      out += content.slice(cursor, mention.tokenStart);
+      cursor = mention.tokenEnd;
+    }
+    out += content.slice(cursor);
+    return out.replace(/[ \t]{2,}/g, " ");
+  }
+
+  private attachmentImageSrc(attachment: Attachment): string | null {
+    if (attachment.type !== "image") return null;
+    if (attachment.dataUrl) return attachment.dataUrl;
+    if (!attachment.path) return null;
+    if (/^(data:|https?:|file:|app:)/.test(attachment.path)) return attachment.path;
+    const abstract = this.plugin.app.vault.getAbstractFileByPath(attachment.path);
+    if (abstract instanceof TFile) {
+      return this.plugin.app.vault.getResourcePath(abstract);
+    }
+    return null;
   }
 
   private openLightbox(src: string, name: string): void {

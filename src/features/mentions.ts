@@ -1,96 +1,134 @@
-import { App, TFile } from "obsidian";
-import type { ChatMessage } from "../types";
+export interface ParsedMentionOccurrence {
+  tokenStart: number;
+  tokenEnd: number;
+  path: string;
+  label?: string;
+}
 
-const MENTION_REGEX = /(?:^|\s)@\[([^\]]+)\]\(([^)]+)\)|(?:^|\s)@"([^"]+)"|(?:^|\s)@([^\s@]+)/g;
-const MARKER_PREFIX = "__OBSIDIAN_AGENTS_MENTION__";
-
-// Extensions we refuse to read as text — vault.read() on these produces binary
-// garbage that bloats the request and corrupts the payload.
-const BINARY_EXTENSIONS = new Set([
-  "png","jpg","jpeg","gif","webp","bmp","ico","tiff","tif","svg",
-  "pdf","zip","gz","tar","7z","rar",
-  "mp3","mp4","wav","ogg","flac","m4a","webm","mov","avi","mkv",
-  "woff","woff2","ttf","otf","eot",
-  "exe","dll","so","dylib",
-]);
+/**
+ * Canonical inline mention syntax used by the composer:
+ *   @[Display Name](vault/path.md)
+ *
+ * The editor stores that plain text verbatim so undo/redo, copy/paste,
+ * persistence, and context bundle parsing remain transparent. `]`, `)`, and
+ * backslashes are escaped with `\` inside the textual token.
+ */
+export function formatInlineMention(label: string, path: string): string {
+  return `@[${escapeMentionLabel(label)}](${escapeMentionPath(path)})`;
+}
 
 export function parseMentions(text: string): string[] {
-	const paths: string[] = [];
-	let match: RegExpExecArray | null;
-	while ((match = MENTION_REGEX.exec(text)) !== null) {
-		const path = match[2] ?? match[3] ?? match[4];
-		if (path && !paths.includes(path)) {
-			paths.push(path);
-		}
-	}
-	return paths;
+  const paths: string[] = [];
+  for (const mention of parseMentionOccurrences(text)) {
+    if (mention.path && !paths.includes(mention.path)) paths.push(mention.path);
+  }
+  return paths;
 }
 
-export async function resolveMentions(
-	text: string,
-	app: App
-): Promise<{ text: string; context: Record<string, string> }> {
-	const paths = parseMentions(text);
-	const context: Record<string, string> = {};
-	let resolvedText = text;
+export function parseMentionOccurrences(text: string): ParsedMentionOccurrence[] {
+  const mentions: ParsedMentionOccurrence[] = [];
+  let i = 0;
+  while (i < text.length) {
+    if (text[i] !== "@") {
+      i++;
+      continue;
+    }
 
-	for (let i = 0; i < paths.length; i++) {
-		const path = paths[i];
-		const marker = `${MARKER_PREFIX}${i}__`;
+    const markdownMention = parseMarkdownMentionAt(text, i);
+    if (markdownMention) {
+      mentions.push(markdownMention);
+      i = markdownMention.tokenEnd;
+      continue;
+    }
 
-		const file = app.vault.getAbstractFileByPath(path);
-		if (file instanceof TFile) {
-			const ext = file.extension.toLowerCase();
-			if (BINARY_EXTENSIONS.has(ext)) {
-				// Binary file — skip content injection, just note the reference.
-				context[path] = `[Binary file: ${path} (${ext}) — contents not included]`;
-			} else {
-				try {
-					const content = await app.vault.read(file);
-					context[path] = content;
-				} catch {
-					context[path] = `[Unable to read file: ${path}]`;
-				}
-			}
-		} else {
-			context[path] = `[File not found: ${path}]`;
-		}
+    const quotedMention = parseQuotedMentionAt(text, i);
+    if (quotedMention) {
+      mentions.push(quotedMention);
+      i = quotedMention.tokenEnd;
+      continue;
+    }
 
-		resolvedText = resolvedText.replace(
-			new RegExp(`@\\[[^\\]]+\\]\\(${escapeRegex(path)}\\)|@"${escapeRegex(path)}"|@${escapeRegex(path)}`, "g"),
-			marker
-		);
-	}
+    const simpleMention = parseSimpleMentionAt(text, i);
+    if (simpleMention) {
+      mentions.push(simpleMention);
+      i = simpleMention.tokenEnd;
+      continue;
+    }
 
-	return { text: resolvedText, context };
+    i++;
+  }
+  return mentions;
 }
 
-export function injectContextIntoMessage(
-	message: ChatMessage,
-	context: Record<string, string>
-): ChatMessage {
-	const entries = Object.entries(context);
-	if (entries.length === 0) return message;
-
-	const blocks = entries.map(([path, content]) => {
-		return `<context file="${escapeHtml(path)}">\n${content}\n</context>`;
-	});
-
-	const prefix = blocks.join("\n\n") + "\n\n";
-	return {
-		...message,
-		content: prefix + message.content,
-	};
+function escapeMentionLabel(label: string): string {
+  return label.replace(/\\/g, "\\\\").replace(/\]/g, "\\]");
 }
 
-function escapeRegex(str: string): string {
-	return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+function escapeMentionPath(path: string): string {
+  return path
+    .replace(/\\/g, "\\\\")
+    .replace(/\(/g, "\\(")
+    .replace(/\)/g, "\\)");
 }
 
-function escapeHtml(str: string): string {
-	return str
-		.replace(/&/g, "&amp;")
-		.replace(/</g, "&lt;")
-		.replace(/>/g, "&gt;")
-		.replace(/"/g, "&quot;");
+function parseMarkdownMentionAt(text: string, start: number): ParsedMentionOccurrence | null {
+  if (text[start + 1] !== "[") return null;
+  const label = readEscapedUntil(text, start + 2, "]");
+  if (!label || text[label.end] !== "(") return null;
+  const path = readEscapedUntil(text, label.end + 1, ")");
+  if (!path) return null;
+  return {
+    tokenStart: start,
+    tokenEnd: path.end + 1,
+    label: label.value,
+    path: path.value,
+  };
+}
+
+function parseQuotedMentionAt(text: string, start: number): ParsedMentionOccurrence | null {
+  if (text[start + 1] !== '"') return null;
+  const path = readEscapedUntil(text, start + 2, '"');
+  if (!path) return null;
+  return {
+    tokenStart: start,
+    tokenEnd: path.end + 1,
+    path: path.value,
+  };
+}
+
+function parseSimpleMentionAt(text: string, start: number): ParsedMentionOccurrence | null {
+  const prev = start > 0 ? text[start - 1] : "";
+  if (prev && /[^\s([{:;,]/.test(prev)) return null;
+  const next = text[start + 1] ?? "";
+  if (!next || /[\s@["]/.test(next)) return null;
+
+  let end = start + 1;
+  while (end < text.length && !/\s|@/.test(text[end])) end++;
+  const path = text.slice(start + 1, end);
+  if (!path) return null;
+  return {
+    tokenStart: start,
+    tokenEnd: end,
+    path,
+  };
+}
+
+function readEscapedUntil(
+  text: string,
+  start: number,
+  terminator: string
+): { value: string; end: number } | null {
+  let value = "";
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === "\\") {
+      if (i + 1 >= text.length) return null;
+      value += text[i + 1];
+      i++;
+      continue;
+    }
+    if (ch === terminator) return { value, end: i };
+    value += ch;
+  }
+  return null;
 }

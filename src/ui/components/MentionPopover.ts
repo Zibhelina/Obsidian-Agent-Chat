@@ -1,10 +1,9 @@
 import { App, setIcon } from "obsidian";
 import { MentionItem } from "../../types";
 import { searchVaultFiles } from "../../lib/vault";
+import { formatInlineMention } from "../../features/mentions";
 
 const MAX_VISIBLE = 30;
-
-type Handler = (item: MentionItem) => void;
 
 /**
  * Minimal textarea-like surface. Lets MentionPopover drive both a native
@@ -33,7 +32,6 @@ export class MentionPopover {
   private el: HTMLElement | null = null;
   private anchorEl: HTMLElement | null = null;
   private app: App;
-  private handler: Handler | null = null;
   private textarea: TextInputLike | null = null;
   private query = "";
   private startIndex = -1;
@@ -42,15 +40,14 @@ export class MentionPopover {
   private active = false;
   private boundClickOutside: (e: MouseEvent) => void;
 
-  constructor(app: App, _unused?: (item: MentionItem) => void) {
+  constructor(app: App) {
     this.app = app;
     this.boundClickOutside = this.handleClickOutside.bind(this);
   }
 
-  mount(parent: HTMLElement, textarea: TextInputLike, onSelect: Handler): void {
+  mount(parent: HTMLElement, textarea: TextInputLike): void {
     this.detach();
     this.textarea = textarea;
-    this.handler = onSelect;
     this.anchorEl = parent;
 
     // Mount into document body with fixed positioning so overflow:hidden
@@ -237,21 +234,18 @@ export class MentionPopover {
   private selectItem(item: MentionItem): void {
     if (!this.textarea || this.startIndex < 0) return;
 
-    // Capture before hide() clears state
-    const capturedItem = item;
-
-    // Strip the @query from the editor — replaceRange triggers onChange
-    // which fires handleInput() synchronously. We hide() first so that
-    // the subsequent handleInput run (with no @ left) is a no-op.
+    // Replace the typed @query with canonical inline mention markup. The
+    // CodeMirror live-preview layer renders this plain text as a compact chip,
+    // while the stored editor value remains parseable by parseMentions().
     const cursor = this.textarea.getCursor();
     const capturedStart = this.startIndex;
+    const nextChar = this.textarea.getValue()[cursor] ?? "";
+    const trailingSpace = nextChar && /\s/.test(nextChar) ? "" : " ";
+    const token = `${formatInlineMention(item.displayName, item.path)}${trailingSpace}`;
     this.hide(); // clear state BEFORE replaceRange triggers re-entrancy
-    this.textarea.replaceRange(capturedStart, cursor, "");
-    this.textarea.setCursor(capturedStart);
+    this.textarea.replaceRange(capturedStart, cursor, token);
+    this.textarea.setCursor(capturedStart + token.length);
     this.textarea.focus();
-
-    // Now add the chip
-    this.handler?.(capturedItem);
   }
 
   private hide(): void {

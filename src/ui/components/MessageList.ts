@@ -11,6 +11,7 @@ export class MessageList extends Component {
   containerEl: HTMLElement;
   private listEl: HTMLElement;
   private bubbles: MessageBubble[] = [];
+  private changeListeners: (() => void)[] = [];
   // True when the viewport is close enough to the bottom that new content
   // should keep the user pinned there. Flips to false the moment they
   // scroll up out of that window during streaming, and stays false until
@@ -47,14 +48,19 @@ export class MessageList extends Component {
     // that the user wants to see fresh output — re-engage follow mode.
     this.followBottom = true;
     this.scrollToBottom();
+    this.notifyChange();
     return bubble;
   }
 
   updateMessage(id: string, updater: (msg: ChatMessage) => ChatMessage, plugin: any): void {
     const bubble = this.bubbles.find((b) => b.getId() === id);
     if (!bubble) return;
-    const updated = updater(bubble.getMessage());
+    const prev = bubble.getMessage();
+    const updated = updater(prev);
     bubble.setMessage(updated);
+    if (prev.role === "user" && prev.content !== updated.content) {
+      this.notifyChange();
+    }
   }
 
   removeMessage(id: string): void {
@@ -63,12 +69,30 @@ export class MessageList extends Component {
     const [bubble] = this.bubbles.splice(idx, 1);
     bubble.detach();
     this.removeChild(bubble);
+    this.notifyChange();
   }
 
   clear(): void {
     this.listEl.empty();
     this.bubbles = [];
     this.followBottom = true;
+    this.notifyChange();
+  }
+
+  /** Subscribe to message-set changes (add/remove/clear, plus user-content edits). */
+  onChange(cb: () => void): void {
+    this.changeListeners.push(cb);
+  }
+
+  private notifyChange(): void {
+    for (const cb of this.changeListeners) cb();
+  }
+
+  /** Snapshot of user-message ids and their content text, in order. */
+  getUserMessageStubs(): { id: string; text: string }[] {
+    return this.bubbles
+      .filter((b) => b.getMessage().role === "user")
+      .map((b) => ({ id: b.getId(), text: b.getMessage().content }));
   }
 
   scrollToBottom(): void {

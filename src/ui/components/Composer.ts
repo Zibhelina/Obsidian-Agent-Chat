@@ -1,16 +1,18 @@
 import { App, Component, setIcon } from "obsidian";
-import { Attachment, MentionItem } from "../../types";
+import { Attachment } from "../../types";
 import { MentionPopover, TextInputLike } from "./MentionPopover";
 import { getSkillRegistry } from "../../features/commands";
 import type { Skill } from "../../skills";
 import { generateId } from "../../lib/id";
 import { LivePreviewEditor } from "./LivePreviewEditor";
+import { encodeAttachmentFile, getAttachmentTypeFromFile, getAudioFormat } from "../../features/attachments";
+import { ModelPicker, type ModelPickerHandlers } from "./ModelPicker";
 
 const EXPAND_THRESHOLD = 80;
 const MAX_ACTIVE_SKILLS = 3;
 
 /**
- * Composer: attach + reply quote + mention chips + skill chips + CM6 editor + send.
+ * Composer: attach + reply quote + inline mention chips + skill chips + CM6 editor + send.
  *
  * The `+` button opens a ChatGPT-style popup with "Attach file" and the list
  * of opt-in skills. Selected skills show as chips in a row below the editor,
@@ -20,12 +22,10 @@ const MAX_ACTIVE_SKILLS = 3;
 export class Composer extends Component {
   containerEl: HTMLElement;
   private editor: LivePreviewEditor;
-  private chipsEl: HTMLElement;
   private skillChipsEl: HTMLElement;
   private quoteEl: HTMLElement;
   private attachmentsEl: HTMLElement;
   private attachments: Attachment[] = [];
-  private mentions: MentionItem[] = [];
   private activeSkills: Skill[] = [];
   private replyQuote: string | null = null;
   private onSend: (text: string, attachments: Attachment[], skillIds?: string[]) => void;
@@ -47,6 +47,8 @@ export class Composer extends Component {
   private expandBtn: HTMLButtonElement;
   private expanded = false;
   private app: App | null = null;
+  private modelPicker: ModelPicker | null = null;
+  private modelPickerSlot: HTMLElement;
 
   // Hysteresis for compact↔stacked flipping driven by visual wrap. Compact
   // mode makes the editor narrower than stacked mode, so a string that wraps
@@ -80,9 +82,6 @@ export class Composer extends Component {
     this.quoteEl = inputWrap.createDiv({ cls: "obsidian-agents-reply-quote" });
     this.quoteEl.style.display = "none";
 
-    this.chipsEl = inputWrap.createDiv({ cls: "obsidian-agents-mention-chips" });
-    this.chipsEl.style.display = "none";
-
     // The prompt sits on its own row above; + / skill-chips / expand / send
     // share the bottom row so chips live inline with the action buttons.
     const editorHost = inputWrap.createDiv({ cls: "obsidian-agents-composer-editor-host" });
@@ -101,6 +100,10 @@ export class Composer extends Component {
       onKeyDown: (evt) => this.handleEditorKeyDown(evt),
       onPaste: (evt) => this.handlePaste(evt),
     });
+    this.registerDomEvent(inputWrap, "dragover", (evt) => {
+      if (evt.dataTransfer?.files?.length) evt.preventDefault();
+    });
+    this.registerDomEvent(inputWrap, "drop", (evt) => this.handleDrop(evt));
 
     const bottomBar = inputWrap.createDiv({ cls: "obsidian-agents-composer-bottom-bar" });
 
@@ -137,6 +140,13 @@ export class Composer extends Component {
       e.preventDefault();
       e.stopPropagation();
       this.setExpanded(!this.expanded);
+    });
+
+    // Slot for the model+effort picker. Mounted after construction via
+    // `setModelPickerHandlers` so the composer doesn't depend on plugin
+    // internals at construction time. Lives just before the send button.
+    this.modelPickerSlot = bottomBar.createDiv({
+      cls: "obsidian-agents-composer-model-picker-slot",
     });
 
     this.sendBtn = bottomBar.createEl("button", {
@@ -188,7 +198,25 @@ export class Composer extends Component {
 
   setApp(app: App): void {
     this.app = app;
-    void this.app;
+    this.editor.setMentionPathResolver((path) =>
+      Boolean(this.app?.vault.getAbstractFileByPath(path))
+    );
+  }
+
+  /**
+   * Mount the model + reasoning effort picker. Called by ChatView after
+   * construction so the composer doesn't reach into plugin settings directly.
+   * Safe to call once.
+   */
+  setModelPickerHandlers(handlers: ModelPickerHandlers): void {
+    if (this.modelPicker) return;
+    this.modelPicker = new ModelPicker(this.modelPickerSlot, handlers);
+    this.addChild(this.modelPicker);
+  }
+
+  /** Re-read settings and update the picker's button label. */
+  refreshModelPicker(): void {
+    this.modelPicker?.refreshButton();
   }
 
   getTextInput(): TextInputLike {
@@ -259,11 +287,6 @@ export class Composer extends Component {
       const sel = this.editor.getSelectionRange();
       const atStart = cursor === 0 && sel.from === 0 && sel.to === 0;
       if (atStart) {
-        if (this.mentions.length > 0) {
-          this.mentions.pop();
-          this.renderChips();
-          return true;
-        }
         if (this.activeSkills.length > 0) {
           this.activeSkills.pop();
           this.renderSkillChips();
@@ -282,9 +305,16 @@ export class Composer extends Component {
     for (const item of Array.from(items)) {
       if (item.kind === "file") {
         const file = item.getAsFile();
-        if (file) this.handleFile(file);
+        if (file) this.handleFile(file, "paste");
       }
     }
+  }
+
+  private handleDrop(evt: DragEvent): void {
+    const files = evt.dataTransfer?.files;
+    if (!files || files.length === 0) return;
+    evt.preventDefault();
+    for (const file of Array.from(files)) this.handleFile(file, "drop");
   }
 
   setMentionPopover(popover: MentionPopover): void {
@@ -293,9 +323,7 @@ export class Composer extends Component {
       ".obsidian-agents-composer-input-wrap"
     ) as HTMLElement;
     if (inputWrap) {
-      this.mentionPopover.mount(inputWrap, this.getTextInput(), (item) =>
-        this.addMention(item)
-      );
+      this.mentionPopover.mount(inputWrap, this.getTextInput());
     }
   }
 
@@ -339,45 +367,6 @@ export class Composer extends Component {
       this.updateSendButton();
       this.editor.focus();
     });
-  }
-
-  private addMention(item: MentionItem): void {
-    if (!this.mentions.some((m) => m.path === item.path)) {
-      this.mentions.push(item);
-      this.renderChips();
-    }
-    this.editor.focus();
-    this.autoResize();
-    this.updateSendButton();
-  }
-
-  private renderChips(): void {
-    this.autoResize();
-    this.chipsEl.empty();
-    if (this.mentions.length === 0) {
-      this.chipsEl.style.display = "none";
-      return;
-    }
-    this.chipsEl.style.display = "flex";
-    for (const m of this.mentions) {
-      const chip = this.chipsEl.createDiv({ cls: "obsidian-agents-mention-chip" });
-      const icon = chip.createSpan({ cls: "obsidian-agents-mention-chip-icon" });
-      setIcon(icon, m.type === "folder" ? "folder" : "file-text");
-      chip.createSpan({ cls: "obsidian-agents-mention-chip-label", text: m.displayName });
-      const remove = chip.createEl("button", {
-        cls: "obsidian-agents-mention-chip-remove",
-        attr: { "aria-label": `Remove ${m.displayName}` },
-      });
-      setIcon(remove, "x");
-      remove.addEventListener("click", (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        this.mentions = this.mentions.filter((x) => x.path !== m.path);
-        this.renderChips();
-        this.updateSendButton();
-        this.editor.focus();
-      });
-    }
   }
 
   private renderSkillChips(): void {
@@ -467,7 +456,6 @@ export class Composer extends Component {
       !multiLine &&
       this.activeSkills.length === 0 &&
       this.attachments.length === 0 &&
-      this.mentions.length === 0 &&
       this.replyQuote == null;
     this.containerEl.toggleClass("obsidian-agents-composer-compact", compact);
   }
@@ -505,7 +493,6 @@ export class Composer extends Component {
     return (
       this.editor.getValue().trim().length > 0 ||
       this.attachments.length > 0 ||
-      this.mentions.length > 0 ||
       this.activeSkills.length > 0 ||
       this.replyQuote != null
     );
@@ -784,33 +771,29 @@ export class Composer extends Component {
     input.onchange = () => {
       const files = input.files;
       if (!files) return;
-      for (const f of Array.from(files)) this.handleFile(f);
+      for (const f of Array.from(files)) this.handleFile(f, "attachment");
     };
     input.click();
   }
 
-  private handleFile(file: File): void {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const dataUrl = reader.result as string;
-      const type: Attachment["type"] = file.type.startsWith("image/")
-        ? "image"
-        : file.type === "application/pdf"
-        ? "pdf"
-        : "file";
-
-      const attachment: Attachment = {
-        id: generateId(),
-        type,
-        name: file.name,
-        path: file.name,
-        dataUrl,
-      };
-      this.attachments.push(attachment);
-      this.renderAttachments();
-      this.updateSendButton();
+  private async handleFile(file: File, source: "attachment" | "paste" | "drop" = "attachment"): Promise<void> {
+    const type = getAttachmentTypeFromFile(file);
+    const dataUrl = await encodeAttachmentFile(file, type);
+    const attachment: Attachment = {
+      id: generateId(),
+      type,
+      name: file.name,
+      path: file.name,
+      dataUrl,
+      mime: file.type || undefined,
+      sizeBytes: file.size,
+      source,
+      originalBytes: await file.arrayBuffer(),
+      audioFormat: type === "audio" ? getAudioFormat(file.name) ?? undefined : undefined,
     };
-    reader.readAsDataURL(file);
+    this.attachments.push(attachment);
+    this.renderAttachments();
+    this.updateSendButton();
   }
 
   private renderAttachments(): void {
@@ -889,15 +872,10 @@ export class Composer extends Component {
     if (
       !text &&
       this.attachments.length === 0 &&
-      this.mentions.length === 0 &&
       this.activeSkills.length === 0
     ) {
       return;
     }
-
-    const mentionPrefix = this.mentions
-      .map((m) => `@[${m.displayName}](${m.path})`)
-      .join(" ");
 
     const quotePrefix = this.replyQuote
       ? this.replyQuote
@@ -906,20 +884,15 @@ export class Composer extends Component {
           .join("\n") + "\n\n"
       : "";
 
-    const bodyText = mentionPrefix
-      ? `${mentionPrefix}${text ? " " : ""}${text}`
-      : text;
-    const fullText = `${quotePrefix}${bodyText}`;
+    const fullText = `${quotePrefix}${text}`;
 
     const skillIds = this.activeSkills.map((s) => s.id);
     this.onSend(fullText, [...this.attachments], skillIds);
     this.editor.setValue("");
     this.attachments = [];
-    this.mentions = [];
     this.replyQuote = null;
     this.activeSkills = [];
     this.renderAttachments();
-    this.renderChips();
     this.renderQuote();
     this.renderSkillChips();
     this.updatePlaceholder();

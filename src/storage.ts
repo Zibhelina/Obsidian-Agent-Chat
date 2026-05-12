@@ -1,6 +1,7 @@
 import type { App } from "obsidian";
 import type { ChatSession, SessionFolder } from "./types";
 import { generateId } from "./lib/id";
+import { compactSessionsForStorage } from "./traceArtifacts";
 
 const SESSIONS_PATH = ".obsidian/obsidian-agents-sessions.json";
 const LEGACY_SESSIONS_PATH = ".obsidian/agentchat-sessions.json";
@@ -54,5 +55,6 @@ export async function saveSessions(
 	app: App,
 	data: { sessions: ChatSession[]; folders: SessionFolder[] }
 ): Promise<void> {
-	await app.vault.adapter.write(SESSIONS_PATH, JSON.stringify(data, null, 2));
+	const sessions = await compactSessionsForStorage(app, data.sessions);
+	await app.vault.adapter.write(SESSIONS_PATH, JSON.stringify({ ...data, sessions }, null, 2));
 }

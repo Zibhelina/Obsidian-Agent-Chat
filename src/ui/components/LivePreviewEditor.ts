@@ -1,4 +1,4 @@
-import { EditorState, RangeSetBuilder, Compartment } from "@codemirror/state";
+import { EditorState, RangeSetBuilder, Compartment, Facet } from "@codemirror/state";
 import {
   EditorView,
   ViewUpdate,
@@ -9,6 +9,7 @@ import {
   placeholder,
 } from "@codemirror/view";
 import { renderMath, finishRenderMath, loadMathJax } from "obsidian";
+import { parseMentionOccurrences } from "../../features/mentions";
 
 // Kick off MathJax loading eagerly — the first render completes once
 // `loadMathJax()` resolves. Safe to call multiple times.
@@ -48,6 +49,35 @@ interface MathSpan {
   from: number;
   to: number;
   src: string;
+}
+
+interface MentionSpan {
+  from: number;
+  to: number;
+  label: string;
+  path: string;
+  ctxId: string;
+}
+
+const mentionPathResolverFacet = Facet.define<(path: string) => boolean, (path: string) => boolean>({
+  combine(values) {
+    return values[0] ?? (() => true);
+  },
+});
+
+function basename(path: string): string {
+  const normalized = path.replace(/\\/g, "/");
+  return normalized.split("/").filter(Boolean).pop() || path;
+}
+
+function collectMentionSpans(docText: string): MentionSpan[] {
+  return parseMentionOccurrences(docText).map((mention, index) => ({
+    from: mention.tokenStart,
+    to: mention.tokenEnd,
+    label: mention.label || basename(mention.path),
+    path: mention.path,
+    ctxId: `ctx_${index + 1}`,
+  }));
 }
 
 function collectInlineMath(lineText: string, lineFrom: number): MathSpan[] {
@@ -167,11 +197,59 @@ class MathWidget extends WidgetType {
   }
 }
 
+class MentionChipWidget extends WidgetType {
+  constructor(
+    readonly label: string,
+    readonly path: string,
+    readonly ctxId: string,
+    readonly failed: boolean
+  ) {
+    super();
+  }
+  eq(other: MentionChipWidget): boolean {
+    return (
+      other.label === this.label &&
+      other.path === this.path &&
+      other.ctxId === this.ctxId &&
+      other.failed === this.failed
+    );
+  }
+  toDOM(): HTMLElement {
+    const chip = document.createElement("span");
+    chip.className =
+      "cm-obsidian-agents-mention-chip" +
+      (this.failed ? " cm-obsidian-agents-mention-chip-failed" : "");
+    chip.title = this.failed
+      ? `Mention target not found: ${this.path}`
+      : this.path;
+    chip.setAttribute("aria-label", `${this.ctxId}: ${this.label}`);
+
+    const ctx = chip.createSpan({ cls: "cm-obsidian-agents-mention-chip-ctx" });
+    ctx.textContent = this.ctxId;
+    const sep = chip.createSpan({ cls: "cm-obsidian-agents-mention-chip-sep" });
+    sep.textContent = ":";
+    const label = chip.createSpan({ cls: "cm-obsidian-agents-mention-chip-label" });
+    label.textContent = this.label;
+    return chip;
+  }
+  ignoreEvent(): boolean {
+    return false;
+  }
+}
+
+function selectionTouchesRange(sel: { from: number; to: number; head: number }, from: number, to: number): boolean {
+  if (sel.from === sel.to) return sel.head >= from && sel.head <= to;
+  return sel.from <= to && sel.to >= from;
+}
+
 function buildDecorations(view: EditorView): DecorationSet {
   const builder = new RangeSetBuilder<Decoration>();
   const doc = view.state.doc;
+  const docText = doc.toString();
   const sel = view.state.selection.main;
   const cursorLine = doc.lineAt(sel.head).number;
+  const mentionSpans = collectMentionSpans(docText);
+  const isMentionPathValid = view.state.facet(mentionPathResolverFacet);
 
   let inFence = false;
   let fenceLang = "";
@@ -319,12 +397,38 @@ function buildDecorations(view: EditorView): DecorationSet {
       // Collect inline math + markdown spans and emit them in order of
       // position. RangeSetBuilder requires strictly non-decreasing `from`.
       const mathSpans = collectInlineMath(text, line.from);
+      const lineMentions = mentionSpans.filter(
+        (m) => m.from >= line.from && m.to <= line.to
+      );
       const inlineSpans = collectInlineSpans(text, line.from).filter(
-        (s) => !mathSpans.some((m) => s.markerStart >= m.from && s.closeEnd <= m.to)
+        (s) =>
+          !mathSpans.some((m) => s.markerStart >= m.from && s.closeEnd <= m.to) &&
+          !lineMentions.some((m) => s.markerStart >= m.from && s.closeEnd <= m.to)
       );
 
       type Entry = { from: number; emit: () => void };
       const entries: Entry[] = [];
+      for (const mention of lineMentions) {
+        entries.push({
+          from: mention.from,
+          emit: () => {
+            if (!selectionTouchesRange(sel, mention.from, mention.to)) {
+              builder.add(
+                mention.from,
+                mention.to,
+                Decoration.replace({
+                  widget: new MentionChipWidget(
+                    mention.label,
+                    mention.path,
+                    mention.ctxId,
+                    !isMentionPathValid(mention.path)
+                  ),
+                })
+              );
+            }
+          },
+        });
+      }
       for (const m of mathSpans) {
         entries.push({
           from: m.from,
@@ -424,6 +528,7 @@ export class LivePreviewEditor {
   private view: EditorView;
   private onChange?: (value: string) => void;
   private placeholderCompartment = new Compartment();
+  private mentionResolverCompartment = new Compartment();
 
   constructor(parent: HTMLElement, opts: LivePreviewEditorOptions = {}) {
     this.dom = parent.createDiv({ cls: "obsidian-agents-composer-cm" });
@@ -440,6 +545,7 @@ export class LivePreviewEditor {
       extensions: [
         EditorView.lineWrapping,
         this.placeholderCompartment.of(placeholder(opts.placeholder || "Ask anything")),
+        this.mentionResolverCompartment.of(mentionPathResolverFacet.of(() => true)),
         livePreviewPlugin,
         updateListener,
         EditorView.theme({
@@ -528,6 +634,14 @@ export class LivePreviewEditor {
   setPlaceholder(text: string): void {
     this.view.dispatch({
       effects: this.placeholderCompartment.reconfigure(placeholder(text)),
+    });
+  }
+
+  setMentionPathResolver(resolver: (path: string) => boolean): void {
+    this.view.dispatch({
+      effects: this.mentionResolverCompartment.reconfigure(
+        mentionPathResolverFacet.of(resolver)
+      ),
     });
   }
 
