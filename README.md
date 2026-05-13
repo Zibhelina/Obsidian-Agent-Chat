@@ -11,20 +11,21 @@ This README is intentionally long. It is meant to be enough for a new contributo
 1. [What it is, in one paragraph](#what-it-is-in-one-paragraph)
 2. [Design philosophy](#design-philosophy)
 3. [Feature tour](#feature-tour)
-4. [Installation and development](#installation-and-development)
-5. [Settings reference](#settings-reference)
-6. [Architecture overview](#architecture-overview)
-7. [The send flow, step by step](#the-send-flow-step-by-step)
-8. [Context bundles and attachments](#context-bundles-and-attachments)
-9. [Trace archival and context hygiene](#trace-archival-and-context-hygiene)
-10. [Inline mentions](#inline-mentions)
-11. [Skills (slash commands)](#skills-slash-commands)
-12. [Background-job callback server](#background-job-callback-server)
-13. [Rich layouts and applets](#rich-layouts-and-applets)
-14. [Context debugger](#context-debugger)
-15. [Storage layout and runtime artifacts](#storage-layout-and-runtime-artifacts)
-16. [Module map](#module-map)
-17. [Glossary](#glossary)
+4. [From zero to running: full setup tutorial](#from-zero-to-running-full-setup-tutorial)
+5. [Installation and development](#installation-and-development)
+6. [Settings reference](#settings-reference)
+7. [Architecture overview](#architecture-overview)
+8. [The send flow, step by step](#the-send-flow-step-by-step)
+9. [Context bundles and attachments](#context-bundles-and-attachments)
+10. [Trace archival and context hygiene](#trace-archival-and-context-hygiene)
+11. [Inline mentions](#inline-mentions)
+12. [Skills (slash commands)](#skills-slash-commands)
+13. [Background-job callback server](#background-job-callback-server)
+14. [Rich layouts and applets](#rich-layouts-and-applets)
+15. [Context debugger](#context-debugger)
+16. [Storage layout and runtime artifacts](#storage-layout-and-runtime-artifacts)
+17. [Module map](#module-map)
+18. [Glossary](#glossary)
 
 ---
 
@@ -64,6 +65,198 @@ A few principles run through every module.
 - **Cost & token stats** — A header info popover shows session token usage and a price estimate. Unknown models are surfaced so you know when the estimate is partial.
 - **Reply / branch / minimap** — Select text in a bubble to "Reply" with a quote; branch a session from any message to fork the conversation; a vertical dot rail on the right minimaps the conversation and zooms under the cursor.
 - **Background-job callbacks** — A local token-authed HTTP server lets scheduled/deferred jobs deliver results back into the current chat, a new chat, a vault note, or a toast — without polling.
+
+---
+
+## From zero to running: full setup tutorial
+
+This tutorial walks you all the way from an empty machine to a working Obsidian vault with Hermes-powered chat — the same setup the author runs. Follow the steps in order; each one is small and verifiable.
+
+You will end up with:
+
+- Obsidian installed and a vault created.
+- Hermes Agent installed and authenticated against at least one LLM provider.
+- The Hermes **gateway** (a local HTTP server) running in the background and surviving reboots.
+- This plugin installed inside the vault, built, enabled, and pointed at the gateway.
+- A working chat session, with the model picker, attachments, mentions, and skills all functional.
+
+Estimated time: **15–25 minutes** the first time.
+
+### Prerequisites
+
+You need a Linux, macOS, or WSL2 machine. Native Windows is **not** supported by Hermes; install [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install) first. Android via Termux is supported by Hermes but the plugin itself is desktop-only.
+
+Have these ready on your PATH:
+
+| Tool | Why | How to check |
+|---|---|---|
+| `git` | Clone the plugin repo. | `git --version` |
+| `node` ≥ 18 and `npm` | Build the plugin bundle. | `node -v && npm -v` |
+| `curl` | Hermes one-line installer. | `curl --version` |
+| Obsidian ≥ 1.6 | The host app. | Download at <https://obsidian.md>. |
+
+You also need an account with **at least one** of the LLM providers Hermes supports — the easiest first choice is [OpenRouter](https://openrouter.ai/keys), because one key unlocks 200+ models. [Anthropic](https://console.anthropic.com), [OpenAI](https://platform.openai.com), or [Google AI Studio](https://aistudio.google.com/app/apikey) also work fine. You can add more providers later.
+
+### Step 1 — Install Obsidian and create a vault
+
+1. Download Obsidian from <https://obsidian.md/download> and install it like any normal desktop app.
+2. Launch Obsidian. From the welcome screen choose **Create new vault**.
+3. Pick a folder somewhere stable (e.g. `~/Documents/MyVault`). Open it.
+4. Once the empty vault is open, quit Obsidian. We'll come back to it after Hermes is running — opening it now is fine too, but the plugin can't load until step 4.
+
+> **Where is my vault?** Whatever folder you picked above. From this point on, `<VAULT>` in this tutorial means that folder. Everything plugin-related will live under `<VAULT>/.obsidian/`.
+
+### Step 2 — Install and configure Hermes
+
+Hermes is a standalone CLI/gateway you install once per machine. It is the *brain* of this setup — the plugin is just a frontend.
+
+#### 2.1 Run the installer
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash
+```
+
+The installer is interactive and handles platform-specific setup (uv, Python, dependencies). When it finishes, reload your shell so `hermes` ends up on your PATH:
+
+```bash
+source ~/.zshrc       # or ~/.bashrc, depending on your shell
+hermes --version      # should print something like "Hermes Agent v0.11.0"
+```
+
+If `hermes --version` fails, open a new terminal window and try again, or check the [Hermes Quickstart](https://hermes-agent.nousresearch.com/docs/getting-started/quickstart) for shell-specific notes.
+
+#### 2.2 Run the setup wizard
+
+```bash
+hermes setup
+```
+
+This is an interactive wizard. The defaults are fine for almost every prompt. Pay attention to these sections:
+
+- **Model / provider** — Pick a provider you have an API key for. If you chose OpenRouter, paste the key from <https://openrouter.ai/keys> when asked, and pick a sensible default model (e.g. `anthropic/claude-sonnet-4` or whatever's current).
+- **Gateway** — Say **yes** to enabling the gateway. The gateway is the local HTTP server the plugin talks to. The wizard will set `API_SERVER_ENABLED=true`, generate an `API_SERVER_KEY`, and write everything to `~/.hermes/.env`.
+- **Tools** — Accept the defaults; you can refine later with `hermes tools`.
+
+When the wizard finishes, verify with:
+
+```bash
+hermes status
+```
+
+You should see a green checkmark next to the chosen provider and the gateway URL. Note the `API_SERVER_HOST` and `API_SERVER_PORT` lines — the plugin auto-detects these from `~/.hermes/.env`, but it's good to know what they are. Defaults are usually `localhost:8080`.
+
+If anything is red, run `hermes doctor` — it prints precise repair instructions.
+
+#### 2.3 Start the gateway as a background service
+
+The plugin can only talk to Hermes when the gateway is running. To make the gateway start automatically every time you log in:
+
+```bash
+hermes gateway install     # installs a launchd / systemd unit
+hermes gateway start       # starts it now
+hermes gateway status      # should say: ✓ running
+```
+
+If you'd rather not run a background service, you can run `hermes gateway run` in a terminal whenever you want to chat — but you'll need to keep that terminal open.
+
+#### 2.4 Smoke-test the gateway
+
+Before touching the plugin, confirm the gateway responds to HTTP. Replace `<KEY>` with the value of `API_SERVER_KEY` from `~/.hermes/.env`:
+
+```bash
+curl -s http://localhost:8080/v1/models \
+  -H "Authorization: Bearer <KEY>" | head -c 200
+```
+
+You should get back JSON listing available models. If you get **connection refused**, the gateway isn't running — go back to step 2.3. If you get **401**, the key in your curl command doesn't match `~/.hermes/.env`. If both look right, run `hermes doctor`.
+
+Once this curl works, the hardest part is done.
+
+### Step 3 — Install the Obsidian Agents plugin
+
+The plugin is a community plugin distributed as source. You clone it into your vault's plugin folder and build it locally.
+
+```bash
+# 1. Make the plugin folder if it doesn't exist yet
+mkdir -p "<VAULT>/.obsidian/plugins"
+
+# 2. Clone into it under the canonical folder name
+cd "<VAULT>/.obsidian/plugins"
+git clone https://github.com/Zibhelina/obsidian-agents.git obsidian-agents
+
+# 3. Build the bundle
+cd obsidian-agents
+npm install
+npm run build
+```
+
+After `npm run build`, you should see a freshly compiled `main.js` in the plugin folder. That's what Obsidian actually loads.
+
+> **The folder name matters.** Obsidian uses the folder name as the plugin ID. It must be `obsidian-agents` — the same as the `id` in `manifest.json` — or the plugin won't load.
+
+### Step 4 — Enable the plugin in Obsidian
+
+1. Open Obsidian and switch to your vault.
+2. Go to **Settings → Community plugins**. If this is a new vault, Obsidian will ask you to **turn off Restricted mode** — do that.
+3. Under **Installed plugins**, you should see **Obsidian Agents**. Toggle it on.
+4. A new ribbon icon (a message circle) appears on the left edge. Click it to open the chat workbench in the right sidebar.
+
+If you don't see the plugin in the list, the folder name is wrong (it must be `obsidian-agents`), or the build failed. Re-run `npm run build` in the plugin folder and check for errors.
+
+### Step 5 — First conversation
+
+You should now see the empty chat workbench. Try this checklist — each item exercises a different subsystem so any breakage is easy to localize.
+
+1. **Hello world.** Type "hi" and press `Cmd/Ctrl+Enter`. You should see streaming tokens within a second or two. If you see "Cannot reach Hermes gateway", the gateway isn't running (`hermes gateway start`). If you see a 401 error, run `hermes setup gateway` to regenerate the key.
+2. **Model picker.** Click the model name in the bottom bar of the composer. Pick a different provider/model. It writes to `~/.hermes/config.yaml` and applies on the next message.
+3. **Effort level.** In the same picker, set reasoning effort. Send a message that warrants it ("explain how SSL handshakes work in detail") and confirm the reasoning panel ticks a live timer above the reply.
+4. **Mentions.** Create a note in the vault (`Cmd/Ctrl+N`), write a paragraph, save it. Back in the chat, type `@` and start typing the note's name — pick it from the popover. Ask "summarize @[note]". The model should respond as if it knows about the file (it received it as a `ctx_n` reference; it can read the bytes via tools).
+5. **Image paste.** Take a screenshot, copy it, paste into the composer with `Cmd/Ctrl+V`. A thumbnail chip appears. Ask "describe what's in this image". You'll see the proxy image was attached for this turn only.
+6. **Skill.** Type `/` to see the skill popover. Pick `tutor`, then ask it to teach you something. The skill's system prompt is now active for this turn.
+7. **Context debugger.** Hover an agent message and click the **debug** action. The three-tab modal shows exactly what was sent to the model, with token estimates per block.
+
+If all seven work, you have the same setup the author uses.
+
+### Step 6 — (Optional) Verify the callback server
+
+Some skills (notably `/automation`) schedule background jobs whose results come back via a local HTTP server the plugin runs. To confirm it's working:
+
+1. Open **Settings → Obsidian Agents → Background-job callback server**. The "Current endpoint" line should show a `http://127.0.0.1:<port>` URL.
+2. Note the token under the same section.
+3. From a terminal, simulate a job firing:
+   ```bash
+   curl -s -X POST "http://127.0.0.1:<port>/callback" \
+     -H "Authorization: Bearer <TOKEN>" \
+     -H "Content-Type: application/json" \
+     -d '{"channel":"notice","payload":{"content":"hello from cron"}}'
+   ```
+4. You should see a toast notification pop up in Obsidian saying "hello from cron".
+
+If the toast appears, the gateway will be able to deliver scheduled-job results into your chats, notes, or as toasts.
+
+### Step 7 — (Optional) Customize
+
+Now that everything works, you can tune things to taste:
+
+- **Add more providers.** Run `hermes login <provider>` (OAuth) or `hermes auth add` (API key). They show up in the model picker on the next launch.
+- **Change approval mode.** Settings → Obsidian Agents → Approval mode. `manual` is safest; `smart` is the author's daily driver; `off` is `--yolo`.
+- **Author your own skill.** Create `<VAULT>/.obsidian/plugins/obsidian-agents/src/skills/my-skill.ts` following the shape of `tutor.ts`, register it in `index.ts`, and run `npm run build`. The composer's `/` popover picks it up automatically.
+- **Run the dev watcher.** `npm run dev` in the plugin folder keeps `main.js` in sync as you edit `.ts` files. Reload Obsidian (`Cmd/Ctrl+R`) to pick up the rebuilt bundle.
+
+### Troubleshooting matrix
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| Plugin doesn't appear in Community plugins list | Folder name isn't `obsidian-agents`, or build failed. | Rename the folder; re-run `npm run build`; check for errors. |
+| Plugin loads but "Cannot reach Hermes gateway" | Gateway isn't running. | `hermes gateway start`; then `hermes gateway status`. |
+| 401 / Unauthorized from gateway | API key drifted between `~/.hermes/.env` and the plugin. | Leave the plugin's "Hermes API key" setting blank and re-run `hermes setup gateway`. |
+| Model picker is empty | Gateway is up but no provider is authenticated. | `hermes status` to see which providers are red; `hermes login <provider>` or `hermes auth add` to fix. |
+| Reasoning panel is empty for some models | The model doesn't expose reasoning, or expose it in a non-standard field. | Try a model known to stream reasoning (Anthropic Sonnet/Opus with effort ≥ medium, GPT-4o-style models). |
+| Image attached but model "didn't see it" | Current-turn payload was dropped by the 80% budget guard. | Use a model with a larger context window, or reduce other context (close older messages, drop mentions). |
+| Mentions render as raw `@[name](path)` text in old chats | Pre-rebrand chat. | New chats render fine; old ones are transcript-frozen by design. |
+| Plugin updates don't take effect | Obsidian is still running the old `main.js`. | Run `npm run build`, then toggle the plugin off/on (or reload Obsidian). |
+
+If you get stuck, `hermes doctor` is usually the fastest diagnosis, followed by `hermes status` and the plugin's own **Context debugger** modal (which shows what was actually sent).
 
 ---
 
