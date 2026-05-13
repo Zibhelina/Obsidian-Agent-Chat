@@ -167,6 +167,14 @@ export class ChatView extends ItemView {
     // Main chat area
     const chatPanel = container.createDiv({ cls: "obsidian-agents-chat-panel" });
 
+    // Top-of-panel header: hosts the model picker on narrow screens (next to
+    // the sidebar-expand button). Always present in DOM; CSS controls when
+    // the picker is visually placed here vs. inside the composer's bottom bar.
+    const chatPanelHeader = chatPanel.createDiv({ cls: "obsidian-agents-chat-panel-header" });
+    const modelPickerHeaderSlot = chatPanelHeader.createDiv({
+      cls: "obsidian-agents-chat-panel-header-model-picker-slot",
+    });
+
     this.sessionStats = new SessionStatsBar(chatPanel);
     this.addChild(this.sessionStats);
 
@@ -209,6 +217,27 @@ export class ChatView extends ItemView {
       },
     });
     this.addChild(this.composer);
+
+    // Reparent the model picker between the composer's bottom bar (wide
+    // screens) and the chat-panel header (narrow screens, next to the
+    // sidebar-expand button). The picker DOM node moves on width change;
+    // there's only ever one picker instance.
+    const composerSlot = this.composer.getModelPickerSlot();
+    const NARROW_WIDTH = 520;
+    const updateModelPickerLocation = (): void => {
+      const isNarrow = container.clientWidth <= NARROW_WIDTH;
+      const pickerEl = composerSlot.firstElementChild ?? modelPickerHeaderSlot.firstElementChild;
+      if (!pickerEl) return;
+      const targetHost = isNarrow ? modelPickerHeaderSlot : composerSlot;
+      if (pickerEl.parentElement !== targetHost) {
+        targetHost.appendChild(pickerEl);
+      }
+    };
+    const resizeObserver = new ResizeObserver(() => updateModelPickerLocation());
+    resizeObserver.observe(container);
+    this.register(() => resizeObserver.disconnect());
+    // Apply initial placement once the picker has mounted.
+    queueMicrotask(updateModelPickerLocation);
 
     // When the composer flips to expanded mode, add a root class so CSS
     // can reshape the layout into a right-side document view.

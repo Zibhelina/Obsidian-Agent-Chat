@@ -337,6 +337,18 @@ button.obsidian-agents-tree-item-menu:hover {
   position: relative;
 }
 
+/* Header bar at the top of the chat panel. Empty (zero-height) on wide
+   screens; on narrow screens it becomes the host for the model picker, sitting
+   alongside the sidebar-expand button. */
+.obsidian-agents-chat-panel-header {
+  display: none;
+}
+
+.obsidian-agents-chat-panel-header-model-picker-slot {
+  display: inline-flex;
+  align-items: center;
+}
+
 .obsidian-agents-session-stats {
   position: absolute;
   top: 10px;
@@ -3348,6 +3360,49 @@ button.obsidian-agents-composer-skill-chip-remove:hover {
     padding-top: 40px;
   }
 
+  /* Surface the chat-panel header on narrow screens. It hosts the model
+     picker (reparented in by ChatView) and sits next to the sidebar-expand
+     button at the top-left, inside the 40px top strip. */
+  .obsidian-agents-chat-panel-header {
+    display: flex;
+    align-items: center;
+    position: absolute;
+    top: 0;
+    left: 40px;
+    right: 0;
+    height: 40px;
+    padding: 0 8px;
+    z-index: 41;
+    pointer-events: none;
+  }
+  .obsidian-agents-chat-panel-header > * {
+    pointer-events: auto;
+  }
+  /* The composer's slot is empty in this mode — collapse it so the bottom
+     bar's spacing stays tight. */
+  .obsidian-agents-composer-model-picker-slot:empty {
+    display: none;
+  }
+  /* In the chat-panel header the picker button gets a slightly tighter
+     footprint to match the 30px sidebar-expand button. */
+  .obsidian-agents-chat-panel-header .obsidian-agents-model-picker-btn,
+  .obsidian-agents-chat-panel-header button.obsidian-agents-model-picker-btn {
+    height: 30px;
+    font-size: 12px;
+    padding: 0 8px 0 10px;
+  }
+  .obsidian-agents-chat-panel-header .obsidian-agents-model-picker-label {
+    max-width: calc(100cqi - 100px);
+  }
+  /* When the picker lives in the top header, its dropdown card must drop
+     downward rather than upward (the default for bottom-bar placement). */
+  .obsidian-agents-chat-panel-header .obsidian-agents-model-card {
+    bottom: auto;
+    top: calc(100% + 8px);
+    left: 0;
+    right: auto;
+  }
+
   /* Switch empty-state to bottom-pinned layout on mobile:
      Greeting is taken out of flex flow and absolutely centered in the panel.
      message-list (flex:1) fills the space, composer pins to the bottom. */
@@ -4624,9 +4679,28 @@ button.obsidian-agents-model-picker-btn:hover,
 }
 
 .obsidian-agents-model-picker-label {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0;
   max-width: 180px;
   overflow: hidden;
+}
+
+.obsidian-agents-model-picker-label-model {
+  overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.obsidian-agents-model-picker-label-sep {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.obsidian-agents-model-picker-label-effort {
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .obsidian-agents-model-picker-caret {

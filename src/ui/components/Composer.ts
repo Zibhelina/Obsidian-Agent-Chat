@@ -206,12 +206,19 @@ export class Composer extends Component {
   /**
    * Mount the model + reasoning effort picker. Called by ChatView after
    * construction so the composer doesn't reach into plugin settings directly.
-   * Safe to call once.
+   * Safe to call once. Pass a `hostEl` to mount the picker outside the composer
+   * (e.g. into a top-of-panel header on narrow screens).
    */
-  setModelPickerHandlers(handlers: ModelPickerHandlers): void {
+  setModelPickerHandlers(handlers: ModelPickerHandlers, hostEl?: HTMLElement): void {
     if (this.modelPicker) return;
-    this.modelPicker = new ModelPicker(this.modelPickerSlot, handlers);
+    this.modelPicker = new ModelPicker(hostEl ?? this.modelPickerSlot, handlers);
     this.addChild(this.modelPicker);
+  }
+
+  /** The slot inside the composer's bottom bar where the model picker lives on
+   *  wide screens. Exposed so ChatView can reparent the picker at runtime. */
+  getModelPickerSlot(): HTMLElement {
+    return this.modelPickerSlot;
   }
 
   /** Re-read settings and update the picker's button label. */

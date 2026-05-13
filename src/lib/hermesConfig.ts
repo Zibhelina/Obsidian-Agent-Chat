@@ -111,18 +111,19 @@ export function readActiveModel(): {
   provider: string | null;
   model: string | null;
   baseUrl: string | null;
+  authSource: string | null;
 } {
-  if (!hermesConfigExists()) return { provider: null, model: null, baseUrl: null };
+  if (!hermesConfigExists()) return { provider: null, model: null, baseUrl: null, authSource: null };
   let text: string;
   try {
     text = readFileSync(HERMES_CONFIG_PATH, "utf-8");
   } catch {
-    return { provider: null, model: null, baseUrl: null };
+    return { provider: null, model: null, baseUrl: null, authSource: null };
   }
   // Match the top-level `model:` mapping. We only care about the first three
   // fields under it. The rest of the block is preserved on writes.
   const blockMatch = text.match(/^model\s*:\s*\n((?:[ \t]+\S[^\n]*\n?)*)/m);
-  if (!blockMatch) return { provider: null, model: null, baseUrl: null };
+  if (!blockMatch) return { provider: null, model: null, baseUrl: null, authSource: null };
   const block = blockMatch[1];
   const grab = (key: string): string | null => {
     const re = new RegExp(`^[ \\t]+${key}\\s*:\\s*['"]?([^\\n'"]*)['"]?\\s*$`, "m");
@@ -133,6 +134,7 @@ export function readActiveModel(): {
     provider: grab("provider"),
     model: grab("default") || grab("model"),
     baseUrl: grab("base_url"),
+    authSource: grab("auth_source"),
   };
 }
 
@@ -152,6 +154,7 @@ export function writeActiveModel(opts: {
   provider: string;
   model: string;
   baseUrl?: string | null;
+  authSource?: string | null;
 }): void {
   let text = "";
   if (hermesConfigExists()) {
@@ -205,6 +208,7 @@ export function writeActiveModel(opts: {
 
   text = setKeyUnderModel(text, "provider", opts.provider);
   text = setKeyUnderModel(text, "default", opts.model);
+  text = setKeyUnderModel(text, "auth_source", opts.authSource ?? null);
   // base_url is only meaningful when the provider has a custom endpoint.
   // Strip it otherwise so the gateway falls back to the provider's default.
   text = setKeyUnderModel(text, "base_url", opts.baseUrl ?? null);

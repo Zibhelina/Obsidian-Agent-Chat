@@ -31,6 +31,15 @@ const EFFORT_LABELS: Record<EffortLevel, string> = {
   high: "High",
 };
 
+type ActiveModelConfig = ReturnType<typeof readActiveModel>;
+
+function displayProviderSlug(active: ActiveModelConfig): string | null {
+  if (active.provider === "anthropic" && active.authSource === "claude-code") {
+    return "claude-code";
+  }
+  return active.provider;
+}
+
 /**
  * Composer toggle — text label with a chevron, next to the send button.
  *
@@ -52,6 +61,8 @@ export class ModelPicker extends Component {
   containerEl: HTMLElement;
   private buttonEl: HTMLButtonElement;
   private labelEl: HTMLSpanElement;
+  private labelModelEl: HTMLSpanElement;
+  private labelEffortEl: HTMLSpanElement;
   private cardEl: HTMLElement | null = null;
   private effortSubCardEl: HTMLElement | null = null;
   private modalEl: HTMLElement | null = null;
@@ -74,6 +85,9 @@ export class ModelPicker extends Component {
       attr: { "aria-label": "Model and reasoning effort" },
     });
     this.labelEl = this.buttonEl.createSpan({ cls: "obsidian-agents-model-picker-label" });
+    this.labelModelEl = this.labelEl.createSpan({ cls: "obsidian-agents-model-picker-label-model" });
+    this.labelEl.createSpan({ cls: "obsidian-agents-model-picker-label-sep", text: " · " });
+    this.labelEffortEl = this.labelEl.createSpan({ cls: "obsidian-agents-model-picker-label-effort" });
     const caret = this.buttonEl.createSpan({ cls: "obsidian-agents-model-picker-caret" });
     setIcon(caret, "chevron-down");
     this.refreshButton();
@@ -103,9 +117,10 @@ export class ModelPicker extends Component {
 
   refreshButton(): void {
     const active = readActiveModel();
-    const modelLabel = this.formatModelDisplay(active.provider, active.model);
+    const modelLabel = this.formatModelDisplay(displayProviderSlug(active), active.model);
     const effortLabel = EFFORT_LABELS[this.handlers.getEffort()];
-    this.labelEl.setText(`${modelLabel} · ${effortLabel}`);
+    this.labelModelEl.setText(modelLabel);
+    this.labelEffortEl.setText(effortLabel);
   }
 
   /**
@@ -157,8 +172,9 @@ export class ModelPicker extends Component {
     this.cardEl.empty();
 
     const active = readActiveModel();
-    const activeProvider = active.provider ? getProvider(active.provider) : null;
-    const activeProviderName = activeProvider?.name ?? active.provider ?? "—";
+    const providerSlug = displayProviderSlug(active);
+    const activeProvider = providerSlug ? getProvider(providerSlug) : null;
+    const activeProviderName = activeProvider?.name ?? providerSlug ?? "—";
     const activeModelName = active.model ?? "—";
 
     // --- Model row ---
@@ -279,7 +295,7 @@ export class ModelPicker extends Component {
 
     // Initialize modal state from whatever's active.
     const active = readActiveModel();
-    this.modalSelectedProviderSlug = active.provider;
+    this.modalSelectedProviderSlug = displayProviderSlug(active);
     this.modalSelectedAuthId = null;
     this.modalSearchQuery = "";
 
@@ -492,7 +508,7 @@ export class ModelPicker extends Component {
     }
 
     const active = readActiveModel();
-    const isActiveProvider = active.provider === activeProvider.slug;
+    const isActiveProvider = displayProviderSlug(active) === activeProvider.slug;
 
     for (const m of filtered) {
       const row = listEl.createDiv({
@@ -562,10 +578,12 @@ export class ModelPicker extends Component {
     if (!provider) return;
 
     try {
+      const isClaudeCode = provider.slug === "claude-code";
       writeActiveModel({
         provider: provider.configSlug ?? provider.slug,
         model: modelId,
-        baseUrl: provider.baseUrl || null,
+        baseUrl: isClaudeCode ? null : provider.baseUrl || null,
+        authSource: isClaudeCode ? "claude-code" : null,
       });
       new Notice(`Switched to ${provider.name} · ${modelId}`);
     } catch (err) {

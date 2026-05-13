@@ -1025,7 +1025,12 @@ class ObsidianAgentsSettingTab extends PluginSettingTab {
 
   private renderProviderAndModelSettings(containerEl: HTMLElement): void {
     const active = readActiveModel();
-    const value = `${active.provider || "gateway default"} / ${active.model || "gateway default"}`;
+    const provider =
+      active.provider === "anthropic" && active.authSource === "claude-code"
+        ? "claude-code"
+        : active.provider;
+    const authSuffix = active.authSource ? ` (${active.authSource})` : "";
+    const value = `${provider || "gateway default"}${authSuffix} / ${active.model || "gateway default"}`;
     const desc = active.baseUrl
       ? `Routing is controlled by ${getHermesConfigPath()}. Base URL: ${active.baseUrl}`
       : `Routing is controlled by ${getHermesConfigPath()}. Use the model picker in the chat composer to change it.`;

@@ -359,6 +359,12 @@ interface RoutingInfo {
   provider?: string;
   model?: string;
   baseUrl?: string;
+  authSource?: string;
+}
+
+function displayRoutingProvider(provider: string | undefined, authSource?: string | null): string | undefined {
+  if (provider === "anthropic" && authSource === "claude-code") return "claude-code";
+  return provider;
 }
 
 function getRoutingInfo(settings: ObsidianAgentsSettings): RoutingInfo {
@@ -367,11 +373,13 @@ function getRoutingInfo(settings: ObsidianAgentsSettings): RoutingInfo {
     active.model ||
     (settings.model && settings.model !== "auto" ? settings.model : undefined) ||
     undefined;
-  const provider = active.provider || inferProvider(model) || undefined;
+  const configuredProvider = active.provider || inferProvider(model) || undefined;
+  const provider = displayRoutingProvider(configuredProvider, active.authSource);
   return {
     provider,
     model,
     baseUrl: active.baseUrl || undefined,
+    authSource: active.authSource || undefined,
   };
 }
 
@@ -401,6 +409,7 @@ function buildRuntimeMetadataBlock(routing: RoutingInfo): string {
   if (timeZone) lines.push(`Current IANA timezone: ${timeZone}`);
   lines.push(`Active Hermes provider: ${routing.provider || "gateway default"}`);
   lines.push(`Active Hermes model: ${routing.model || "gateway default"}`);
+  if (routing.authSource) lines.push(`Active Hermes auth source: ${routing.authSource}`);
   if (routing.baseUrl) lines.push(`Active Hermes base URL: ${routing.baseUrl}`);
 
   return `\n\n## Runtime metadata\n\n${lines
@@ -896,8 +905,13 @@ export class HermesInterface {
                   asString(payload.compaction_details ?? payload.compactionDetails) ||
                   "Hermes emitted this snapshot from the provider request path.";
 
+                const displayProvider = displayRoutingProvider(
+                  provider || routing.provider || inferProvider(model || routing.model),
+                  routing.authSource
+                );
+
                 if (model) contextDebugModel = model;
-                if (provider) contextDebugProvider = provider;
+                if (displayProvider) contextDebugProvider = displayProvider;
                 handlers.onContextDebug?.(
                   createContextDebugSnapshot({
                     rawRequest,
@@ -907,7 +921,7 @@ export class HermesInterface {
                         : "plugin_gateway_request",
                     apiMode,
                     model: model || routing.model,
-                    provider: provider || routing.provider || inferProvider(model || routing.model),
+                    provider: displayProvider,
                     sessionId: sessionId || runtime?.sessionId,
                     contextWindow,
                     estimatedTokens,
