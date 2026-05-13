@@ -74,8 +74,8 @@ function escapeMentionPath(path: string): string {
 function parseMarkdownMentionAt(text: string, start: number): ParsedMentionOccurrence | null {
   if (text[start + 1] !== "[") return null;
   const label = readEscapedUntil(text, start + 2, "]");
-  if (!label || text[label.end] !== "(") return null;
-  const path = readEscapedUntil(text, label.end + 1, ")");
+  if (!label || text[label.end + 1] !== "(") return null;
+  const path = readEscapedUntil(text, label.end + 2, ")");
   if (!path) return null;
   return {
     tokenStart: start,

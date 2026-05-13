@@ -1862,31 +1862,42 @@ button.obsidian-agents-composer-expand-btn:hover {
   border-radius: 4px;
 }
 
+/* Codex-style mention: borderless, inline with prose. Just an icon followed
+   by a colored label tinted by file type. */
 .cm-obsidian-agents-mention-chip {
   display: inline-flex;
-  align-items: baseline;
-  gap: 3px;
-  max-width: 260px;
-  padding: 0 6px;
+  align-items: center;
+  gap: 4px;
+  max-width: min(260px, 60cqi);
+  padding: 0 2px;
   margin: 0 1px;
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 5px;
-  background: var(--background-secondary);
-  color: var(--text-normal);
-  font-size: 0.88em;
+  color: var(--mention-color, var(--text-normal));
   font-weight: 500;
-  line-height: 1.45;
+  line-height: inherit;
   vertical-align: baseline;
+  transform: translateY(0.08em);
   white-space: nowrap;
+  border-radius: 4px;
+  transition: background 0.1s ease;
 }
 
-.cm-obsidian-agents-mention-chip-ctx {
-  color: var(--interactive-accent);
-  font-weight: 650;
+.cm-obsidian-agents-mention-chip:hover {
+  background: color-mix(in srgb, var(--mention-color, var(--text-normal)) 10%, transparent);
 }
 
-.cm-obsidian-agents-mention-chip-sep {
-  color: var(--text-faint);
+.cm-obsidian-agents-mention-chip-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--mention-color, var(--text-normal));
+}
+
+.cm-obsidian-agents-mention-chip-icon .svg-icon,
+.cm-obsidian-agents-mention-chip-icon svg {
+  width: 1em;
+  height: 1em;
+  stroke-width: 2;
 }
 
 .cm-obsidian-agents-mention-chip-label {
@@ -1896,10 +1907,32 @@ button.obsidian-agents-composer-expand-btn:hover {
 }
 
 .cm-obsidian-agents-mention-chip-failed {
-  border-color: var(--text-error);
-  color: var(--text-error);
-  background: color-mix(in srgb, var(--text-error) 10%, transparent);
+  --mention-color: var(--text-error);
+  text-decoration: underline wavy var(--text-error);
+  text-underline-offset: 3px;
 }
+
+/* Per-file-type tones — used for both composer chips and message-bubble chips. */
+.cm-obsidian-agents-mention-chip.is-image,
+.obsidian-agents-mention-chip.is-image     { --mention-color: #b46bd9; }
+.cm-obsidian-agents-mention-chip.is-audio,
+.obsidian-agents-mention-chip.is-audio     { --mention-color: #4caf7d; }
+.cm-obsidian-agents-mention-chip.is-video,
+.obsidian-agents-mention-chip.is-video     { --mention-color: #d97757; }
+.cm-obsidian-agents-mention-chip.is-pdf,
+.obsidian-agents-mention-chip.is-pdf       { --mention-color: #d8584d; }
+.cm-obsidian-agents-mention-chip.is-markdown,
+.obsidian-agents-mention-chip.is-markdown  { --mention-color: var(--interactive-accent); }
+.cm-obsidian-agents-mention-chip.is-canvas,
+.obsidian-agents-mention-chip.is-canvas    { --mention-color: #c9a227; }
+.cm-obsidian-agents-mention-chip.is-data,
+.obsidian-agents-mention-chip.is-data      { --mention-color: #4a90c2; }
+.cm-obsidian-agents-mention-chip.is-code,
+.obsidian-agents-mention-chip.is-code      { --mention-color: #6f86d6; }
+.cm-obsidian-agents-mention-chip.is-folder,
+.obsidian-agents-mention-chip.is-folder    { --mention-color: var(--text-muted); }
+.cm-obsidian-agents-mention-chip.is-default,
+.obsidian-agents-mention-chip.is-default   { --mention-color: var(--text-muted); }
 
 /* Headings — match Obsidian live-preview feel */
 .cm-acb-heading { font-weight: 700; line-height: 1.25; }
@@ -2157,47 +2190,49 @@ textarea.obsidian-agents-composer-textarea:focus {
 .obsidian-agents-mention-chips {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 4px 10px;
   padding: 8px 10px 4px 10px;
   margin: 0;
 }
 
+/* Codex-style chip: borderless icon + colored label, inline. Tone classes
+   (.is-image / .is-pdf / …) supply the --mention-color. */
 .obsidian-agents-mention-chip {
   display: inline-flex;
   align-items: center;
-  padding: 6px 10px 6px 8px;
-  background: var(--background-modifier-hover);
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 999px;
+  gap: 5px;
+  padding: 2px 4px;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
   font-size: 12px;
-  color: var(--text-normal);
+  color: var(--mention-color, var(--text-muted));
   max-width: 240px;
-  transition: padding 0.22s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: background 0.1s ease;
 }
 
 .obsidian-agents-mention-chip:hover {
-  padding-right: 8px;
+  background: color-mix(in srgb, var(--mention-color, var(--text-normal)) 12%, transparent);
 }
 
 .obsidian-agents-mention-chip-icon {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 22px;
-  height: 22px;
-  border-radius: 999px;
-  background: var(--background-secondary);
-  color: var(--interactive-accent);
+  width: 1em;
+  height: 1em;
   flex-shrink: 0;
+  color: var(--mention-color, var(--text-muted));
 }
 
 .obsidian-agents-mention-chip-icon .svg-icon {
-  width: 13px;
-  height: 13px;
+  width: 1em;
+  height: 1em;
+  stroke-width: 2;
 }
 
 .obsidian-agents-mention-chip-label {
-  margin-left: 7px;
+  margin-left: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;

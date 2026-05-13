@@ -5,6 +5,7 @@ import { LayoutEngine } from "./LayoutEngine";
 import { getSkill } from "../../features/commands";
 import { ContextDebugModal } from "./ContextDebugModal";
 import { parseMentionOccurrences } from "../../features/mentions";
+import { pickMentionIcon, pickMentionTone } from "./LivePreviewEditor";
 
 export class MessageBubble extends Component {
   private wrapper: HTMLElement;
@@ -99,9 +100,12 @@ export class MessageBubble extends Component {
           cls: "obsidian-agents-mention-chips obsidian-agents-message-mention-chips",
         });
         for (const m of mentions) {
-          const chip = chipRow.createDiv({ cls: "obsidian-agents-mention-chip" });
+          const tone = pickMentionTone(m.path);
+          const chip = chipRow.createDiv({
+            cls: `obsidian-agents-mention-chip ${tone}`,
+          });
           const iconEl = chip.createSpan({ cls: "obsidian-agents-mention-chip-icon" });
-          setIcon(iconEl, "file-text");
+          setIcon(iconEl, pickMentionIcon(m.path));
           chip.createSpan({
             cls: "obsidian-agents-mention-chip-label",
             text: m.name,

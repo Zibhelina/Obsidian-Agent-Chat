@@ -8,7 +8,7 @@ import {
   WidgetType,
   placeholder,
 } from "@codemirror/view";
-import { renderMath, finishRenderMath, loadMathJax } from "obsidian";
+import { renderMath, finishRenderMath, loadMathJax, setIcon } from "obsidian";
 import { parseMentionOccurrences } from "../../features/mentions";
 
 // Kick off MathJax loading eagerly — the first render completes once
@@ -197,6 +197,43 @@ class MathWidget extends WidgetType {
   }
 }
 
+/** File-type tones used to colorize mention chips by extension. The class
+ *  names map to color tokens in styles.css. */
+export function pickMentionTone(path: string): string {
+  const ext = path.split(".").pop()?.toLowerCase() ?? "";
+  if (["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "avif", "heic"].includes(ext)) {
+    return "is-image";
+  }
+  if (["mp3", "wav", "m4a", "ogg", "flac", "aac"].includes(ext)) return "is-audio";
+  if (["mp4", "mov", "webm", "mkv", "avi"].includes(ext)) return "is-video";
+  if (ext === "pdf") return "is-pdf";
+  if (ext === "md" || ext === "mdx") return "is-markdown";
+  if (ext === "canvas") return "is-canvas";
+  if (["json", "yaml", "yml", "toml", "xml", "csv", "tsv"].includes(ext)) return "is-data";
+  if (["js", "ts", "tsx", "jsx", "py", "rs", "go", "java", "c", "cpp", "rb", "sh", "css", "html"].includes(ext)) {
+    return "is-code";
+  }
+  if (path.endsWith("/")) return "is-folder";
+  return "is-default";
+}
+
+/** Lucide icon name (shipped with Obsidian) for the given path. */
+export function pickMentionIcon(path: string): string {
+  const tone = pickMentionTone(path);
+  switch (tone) {
+    case "is-image": return "image";
+    case "is-audio": return "music";
+    case "is-video": return "video";
+    case "is-pdf": return "file-text";
+    case "is-markdown": return "file-text";
+    case "is-canvas": return "layout-dashboard";
+    case "is-data": return "database";
+    case "is-code": return "code";
+    case "is-folder": return "folder";
+    default: return "file";
+  }
+}
+
 class MentionChipWidget extends WidgetType {
   constructor(
     readonly label: string,
@@ -216,18 +253,17 @@ class MentionChipWidget extends WidgetType {
   }
   toDOM(): HTMLElement {
     const chip = document.createElement("span");
+    const tone = pickMentionTone(this.path);
     chip.className =
-      "cm-obsidian-agents-mention-chip" +
+      `cm-obsidian-agents-mention-chip ${tone}` +
       (this.failed ? " cm-obsidian-agents-mention-chip-failed" : "");
     chip.title = this.failed
       ? `Mention target not found: ${this.path}`
       : this.path;
     chip.setAttribute("aria-label", `${this.ctxId}: ${this.label}`);
 
-    const ctx = chip.createSpan({ cls: "cm-obsidian-agents-mention-chip-ctx" });
-    ctx.textContent = this.ctxId;
-    const sep = chip.createSpan({ cls: "cm-obsidian-agents-mention-chip-sep" });
-    sep.textContent = ":";
+    const iconEl = chip.createSpan({ cls: "cm-obsidian-agents-mention-chip-icon" });
+    setIcon(iconEl, pickMentionIcon(this.path));
     const label = chip.createSpan({ cls: "cm-obsidian-agents-mention-chip-label" });
     label.textContent = this.label;
     return chip;
