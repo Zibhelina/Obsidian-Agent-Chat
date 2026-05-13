@@ -1,172 +1,560 @@
 # Obsidian Agents
 
-A high-quality chat interface for Hermes agents inside Obsidian.
+A high-quality chat interface for [Hermes](https://github.com/) agents inside [Obsidian](https://obsidian.md). Obsidian Agents owns the chat UI, composer, session model, and request shape; Hermes owns model routing, credentials, providers, and tool execution. Together they turn Obsidian into a thoughtful, file-aware agentic workspace.
 
-## Features
+This README is intentionally long. It is meant to be enough for a new contributor — or a curious user — to fully understand the project by reading it once, from top to bottom.
 
-- **Session Management** — Create, organize, and switch between chat sessions using folders.
-- **Rich Media Support** — Paste images, files, and PDFs directly into the composer.
-- **Thinking Traces & Metrics** — View agent reasoning, time taken, tokens used, and model info.
-- **Hermes CLI Integration** — Run Hermes commands with `/` autocomplete and permission widgets.
-- **Dynamic Layouts** — Position images and applets on the left, right, above, or below text.
-- **Vault Mentions** — Use `@` to insert inline file/folder mention chips backed by parseable `@[label](path)` text.
-- **Context Bundles** — Mentions and attachments are sent as structured `ctx_n` references with compact metadata instead of ad hoc context walls.
-- **Attachment Vault** — Pasted/dropped originals and image derivatives are stored under `agent-vault/runtime/` for debugging and on-demand inspection.
-- **Context Hygiene** — Historical images, audio, tool traces, and debug payloads are archived by reference instead of being replayed into every request.
-- **Minimal Settings** — Configure agent name and effort level. Active model routing is inherited from Hermes config by default.
+---
 
-## Installation
+## Table of contents
 
-### From Source
+1. [What it is, in one paragraph](#what-it-is-in-one-paragraph)
+2. [Design philosophy](#design-philosophy)
+3. [Feature tour](#feature-tour)
+4. [Installation and development](#installation-and-development)
+5. [Settings reference](#settings-reference)
+6. [Architecture overview](#architecture-overview)
+7. [The send flow, step by step](#the-send-flow-step-by-step)
+8. [Context bundles and attachments](#context-bundles-and-attachments)
+9. [Trace archival and context hygiene](#trace-archival-and-context-hygiene)
+10. [Inline mentions](#inline-mentions)
+11. [Skills (slash commands)](#skills-slash-commands)
+12. [Background-job callback server](#background-job-callback-server)
+13. [Rich layouts and applets](#rich-layouts-and-applets)
+14. [Context debugger](#context-debugger)
+15. [Storage layout and runtime artifacts](#storage-layout-and-runtime-artifacts)
+16. [Module map](#module-map)
+17. [Glossary](#glossary)
 
-1. Clone or copy this repository into your vault's `.obsidian/plugins/` folder:
-   ```bash
-   cd /path/to/your/vault/.obsidian/plugins/
-   git clone https://github.com/Zibhelina/Obsidian-Agent-Chat.git obsidian-agents
-   cd obsidian-agents
-   ```
+---
 
-2. Install dependencies and build:
-   ```bash
-   npm install
-   npm run build
-   ```
+## What it is, in one paragraph
 
-3. Enable **Obsidian Agents** in Obsidian's Community Plugins settings.
+Obsidian Agents is a desktop-only Obsidian plugin that mounts a full chat workbench inside the right sidebar. You type messages, mention vault files with `@`, invoke skills with `/`, paste images or audio, and a streamed reply comes back with optional reasoning traces, tool calls, interactive applets, and rich media layouts. Under the hood it talks to a local [Hermes](https://github.com/) gateway over an OpenAI-compatible HTTP/SSE protocol. The plugin's job is to make that conversation pleasant, file-aware, and **context-hygienic**: it never replays old binary blobs into the model, it archives reasoning traces by reference, and it keeps the user-visible transcript clean while building a structured, debuggable request for the model.
 
-### Development
+---
 
-Run the watcher for live rebuilds:
+## Design philosophy
+
+A few principles run through every module.
+
+- **Separation of concerns with Hermes.** Hermes owns the gateway, credentials, providers, model routing, and tool execution. The plugin owns UI, sessions, composer behavior, attachment handling, and the *shape* of each request. The active model and approval mode live in `~/.hermes/config.yaml` so every Hermes client (CLI, TUI, this plugin, etc.) sees the same routing.
+- **Context hygiene over completeness.** Models pay tokens for everything you send. The plugin aggressively prunes anything the model doesn't actually need *right now*: historical base64 images, raw tool outputs, hidden reasoning, debug snapshots, and full text bodies of mentioned files. Past content survives as compact references, not payloads.
+- **Two transcripts, not one.** What the user sees and what the model receives are different artifacts. User bubbles render raw text plus chips; the model receives `[ctx_n: filename]` references followed by a single `<context_bundle>` JSON block.
+- **Durable artifacts, ephemeral transport.** Originals, derivatives, bundles, and traces are written to disk under `agent-vault/` (gitignored). Storage is the source of truth; in-memory base64 blobs are discarded as soon as a durable file exists.
+- **Make the model honest.** Every system prompt teaches the model that a file *reference* is not the same thing as having *inspected* the file. If it needs to read something, it should use tools — and if a payload was omitted for budget reasons, the prompt says so.
+- **Composer feels native.** The input is a CodeMirror 6 editor with live-preview markdown, inline mention chips, skill chips, and live attachment thumbnails — but the underlying text is plain, copy-pasteable, undo-friendly Markdown.
+
+---
+
+## Feature tour
+
+- **Session management** — Sessions live in a folder tree, support drag-drop, rename, branch-from-message, and have an unread-dot indicator that lights up when an agent reply lands while you're looking elsewhere.
+- **Streaming responses** — Tokens, reasoning ("thinking"), tool calls, layout blocks, and usage metrics stream in over SSE. The reasoning panel ticks a live timer; the user can scroll without being yanked back to the bottom.
+- **Reasoning trace drawer** — Per-message collapsible panel with the model's `<thinking>` content interleaved with tool calls in a timeline, resizable to fullscreen.
+- **Steering queue** — Messages you type while a stream is in flight buffer up and coalesce into the next turn instead of getting lost or interrupting.
+- **Vault mentions** — Type `@` to fuzzy-search files and folders. Selections insert as `@[Display](vault/path.md)` plain text that the composer renders as a chip.
+- **Skill chips (`/`-commands)** — On-demand prompt modules: tutor, applet builder, web search, blog mode, automation/scheduler, audio transcription, PDF→Markdown, plugin self-improve, etc. Up to three active per turn, displayed as chips above the composer.
+- **Multimodal attachments** — Paste, drop, or mention images, audio, PDFs, and text files. Images are downscaled to a JPEG visual proxy for the model; originals are kept durably on disk.
+- **Inline applets** — The agent can emit `obsidian-agents-applet` (raw HTML/JS) or `obsidian-agents-react` (React 18) fenced blocks that mount as sandboxed, theme-aware iframes inside the message. Used for interactive widgets, charts, 3D scenes, simulators.
+- **Rich layout blocks** — JSON-driven `obsidian-agents-hero`, `obsidian-agents-gallery`, `obsidian-agents-carousel`, `obsidian-agents-map`, `obsidian-agents-card-list`, `obsidian-agents-split`, and `obsidian-agents-terms` blocks render polished media-rich replies.
+- **Inline term glossary** — `[[Label]]{#slug}` markers in a reply open a slide-in panel with the term's hero image, summary, key facts, and source links (driven by a `obsidian-agents-terms` block).
+- **Permission widgets** — Dangerous tool calls render as an inline applet with Accept / Deny / Explain buttons, controlled by the approval mode in Hermes config.
+- **Context debugger** — A three-tab modal (Blocks / Raw JSON / Stats) lets you inspect exactly what was sent: each labeled block, token estimates, context-window usage, cost, and compaction status.
+- **Cost & token stats** — A header info popover shows session token usage and a price estimate. Unknown models are surfaced so you know when the estimate is partial.
+- **Reply / branch / minimap** — Select text in a bubble to "Reply" with a quote; branch a session from any message to fork the conversation; a vertical dot rail on the right minimaps the conversation and zooms under the cursor.
+- **Background-job callbacks** — A local token-authed HTTP server lets scheduled/deferred jobs deliver results back into the current chat, a new chat, a vault note, or a toast — without polling.
+
+---
+
+## Installation and development
+
+Obsidian Agents is **desktop-only** (it uses Node's `http`, `fs`, and similar). Mobile Obsidian is not supported.
+
+### From source
+
 ```bash
-npm run dev
+cd /path/to/your/vault/.obsidian/plugins/
+git clone https://github.com/Zibhelina/Obsidian-Agent-Chat.git obsidian-agents
+cd obsidian-agents
+npm install
+npm run build
 ```
 
-## Usage
+Then enable **Obsidian Agents** under **Settings → Community plugins**.
 
-Open Obsidian Agents via:
-- The **message-circle** ribbon icon
-- The Command Palette: `Obsidian Agents: Open Obsidian Agents`
+### Development loop
 
-### Keyboard Shortcuts
+```bash
+npm run dev    # watcher rebuilds main.js on every change
+```
 
-- `Ctrl/Cmd + Enter` — Send message
-- `@` — Mention a vault file or folder
-- `/` — Trigger Hermes command autocomplete
+Obsidian only loads the compiled `main.js`, never the `.ts` sources, so you must rebuild after every TypeScript edit. The `dev` script keeps a watcher running for you. To pick up the new bundle, either toggle the plugin off/on in settings or reload Obsidian (`Cmd/Ctrl+R`).
 
-### Settings
+### Build pipeline
 
-Obsidian Agents keeps settings minimal:
+- TypeScript sources under `src/` compile via [esbuild](https://esbuild.github.io/) (`esbuild.config.mjs`) into a single `main.js` at the plugin root.
+- `main.ts` is a one-line re-export of `src/plugin.ts` because Obsidian expects `main.js` to default-export the `Plugin` class.
+- `manifest.json`, `styles.css`, and `main.js` are the only files Obsidian loads at runtime.
 
-| Setting       | Description                                      |
-|---------------|--------------------------------------------------|
-| Agent name    | Display name for the AI agent                    |
-| Active Hermes model | Read-only view of the model/provider Hermes is currently routing to |
-| Effort level  | Minimal / Low / Medium / High reasoning effort   |
+---
 
-All other configuration (API keys, providers, tools, model routing) is inherited from the local Hermes setup.
+## Settings reference
 
-## Context and File Handling
+The Settings tab is kept deliberately small — most "settings" you'd expect (provider, model, API keys) live in `~/.hermes/config.yaml` so all Hermes clients agree.
 
-Obsidian Agents keeps the visible chat transcript clean while building a separate model-facing request.
+| Setting | What it does |
+|---|---|
+| **Agent name** | Display name for the AI (default "Hermes"). |
+| **Provider / model** | Read-only view of the active Hermes route. Change it from the composer's model picker, which writes to `~/.hermes/config.yaml`. |
+| **Effort level** | Reasoning effort sent on the next message (`minimal` / `low` / `medium` / `high`). Mirrored to Hermes config. |
+| **Hermes gateway URL** | Override the default `http://localhost:8080/v1`. Leave blank to auto-detect from `~/.hermes/.env`. |
+| **Hermes API key** | Override `API_SERVER_KEY` from `~/.hermes/.env`. |
+| **Approval mode** | `manual` (prompt on every dangerous command), `smart` (LLM-judged), `off` (`--yolo`). Mirrored to Hermes config. |
+| **Callback server** | Enable/disable; host (default `127.0.0.1`), port (`0` = auto-pick), shared-secret token (auto-generated). |
 
-- Inline vault mentions are stored as plain text such as `@[README](projects/foo/README.md)` and rendered as compact chips in the composer.
-- On send, mentions and attachments are normalized into `ContextItem` records with stable request-local ids such as `ctx_1`.
-- The model-facing user message contains readable references like `[ctx_1: README.md]` plus one `<context_bundle>` JSON block.
-- Pasted and dropped originals are written to `.obsidian/plugins/obsidian-agents/agent-vault/runtime/attachments/`.
-- Image derivatives for model input are written to `.obsidian/plugins/obsidian-agents/agent-vault/runtime/derivatives/`.
-- Context bundle debug JSON is written to `.obsidian/plugins/obsidian-agents/agent-vault/runtime/context-bundles/`.
-- Historical image/audio attachments are reference-only on later turns. Base64 payloads are not replayed into every request.
-- If current-turn binary payloads would push the estimated request over 80% of the configured context window, the request keeps file references and omits the pixels/audio.
+On load, the plugin **reconciles** its in-memory `approvalMode` and `effortLevel` with whatever Hermes config currently says, because the CLI, TUI, or Telegram clients might have changed them between sessions.
 
-## Trace Archival
+---
 
-Full reasoning/tool/debug payloads are archived outside normal session JSON after a turn completes. Stored assistant messages keep compact `traceRef` metadata pointing to `.obsidian/plugins/obsidian-agents/agent-vault/traces/`, and the model receives only compact archived activity pointers for previous turns.
-
-The reasoning drawer can still show where full archived activity lives, but hidden traces and raw tool outputs are not repeatedly carried in active chat context.
-
-## Architecture
+## Architecture overview
 
 ```
+main.ts                          — entry shim (re-exports src/plugin.ts)
+manifest.json                    — Obsidian plugin manifest
+styles.css                       — Obsidian-loaded stylesheet (theme-aware)
+esbuild.config.mjs               — bundle config
 src/
-  plugin.ts          — Main plugin lifecycle, settings tab, session management
-  types.ts           — Core TypeScript interfaces
-  settings.ts        — Settings load/save helpers
-  storage.ts         — Session/folder persistence
-  hermes.ts          — Hermes CLI/gateway communication
-  tokenizer.ts       — Token estimation utilities
+  plugin.ts                      — Plugin class: lifecycle, sessions, send flow, settings tab
+  types.ts                       — All shared TypeScript types
+  settings.ts                    — Settings load/save helpers
+  storage.ts                     — Session/folder JSON persistence + trace compaction hook
+  hermes.ts                      — Hermes gateway: request build, SSE streaming, system prompt
+  contextDebug.ts                — Parse plugin / Hermes / OpenAI Responses payloads into labeled blocks
+  traceArtifacts.ts              — Archive reasoning/tool/debug payloads to disk by reference
+  tokenizer.ts                   — Naive ~4-chars-per-token estimator
   lib/
-    id.ts            — ID generation
-    agentVaultRuntime.ts — Runtime artifact path and write helpers
-    vault.ts         — Vault file search & mention resolution
-    layout.ts        — Layout block parsing & CSS grid helpers
+    agentVaultRuntime.ts         — Safe paths and binary/text writes under agent-vault/
+    hermesConfig.ts              — Read/write ~/.hermes/config.yaml
+    hermesProviders.ts           — Provider/auth catalog for the model picker
+    modelsCache.ts               — Cache of available models from the Hermes gateway
+    vault.ts                     — Vault search and file helpers
+    layout.ts                    — Parse "position=…" fence attributes for layout blocks
+    costEstimation.ts            — Per-model pricing for the stats bar
+    id.ts                        — Random ID generator
   features/
-    mentions.ts      — @mention parsing and inline mention token support
-    contextBundle.ts — ContextItem/context bundle construction
-    attachments.ts   — Clipboard/drag-drop file handling
-    commands.ts      — Hermes CLI command autocomplete
-    applets.ts       — Dynamic applet registry (code blocks, charts)
+    mentions.ts                  — Parse @[label](path) inline mention tokens
+    contextBundle.ts             — Build ContextItem records, derivatives, bundle JSON
+    attachments.ts               — Paste / drag-drop / file capture, chip preview rendering
+    commands.ts                  — Thin shim that exposes the skill registry as slash commands
+    applets.ts                   — Pluggable inline applet registry (legacy/extension hook)
+  skills/
+    index.ts                     — Skill registry (canonical list of slash skills)
+    types.ts                     — Skill interface
+    *.ts                         — One file per skill
+  callback/
+    server.ts                    — Local HTTP server (token-auth, JSON only)
+    channels/
+      index.ts                   — ChannelRegistry, built-in registrations
+      types.ts                   — DeliveryChannel / DeliveryContext interfaces
+      chat.ts, newChat.ts,       — Built-in delivery channels
+      note.ts, notice.ts
   ui/
-    ChatView.ts      — Main Obsidian ItemView
-    components/      — Sidebar, Composer, MessageList, MessageBubble,
-                       ThinkingTrace, StatusBar, PermissionWidget,
-                       LayoutEngine, MentionPopover
+    ChatView.ts                  — Main ItemView: orchestrates panels and stream handlers
+    components/
+      Sidebar.ts                 — Session/folder tree with drag-drop, unread dots
+      Composer.ts                — Editor + skill chips + attachments + model picker
+      LivePreviewEditor.ts       — CodeMirror 6 wrapper with markdown decorations + chip widgets
+      MentionPopover.ts          — @-popover for vault files
+      MessageList.ts              — Scroll-aware list of bubbles
+      MessageBubble.ts           — User/agent bubble with thinking trace + attachments
+      ThinkingTrace.ts           — Reasoning + tool-call timeline drawer
+      ContextDebugModal.ts       — Blocks / Raw JSON / Stats inspector
+      ModelPicker.ts             — Provider / auth / model selector (writes Hermes config)
+      LayoutEngine.ts             — Markdown + applets + rich-layout renderer
+      rich-layouts.ts            — Hero / gallery / carousel / map / split / cards / terms
+      TermPanel.ts               — Slide-in glossary detail panel
+      PermissionWidget.ts        — Inline tool-approval applet
+      SessionStatsBar.ts         — Token + cost info popover
+      ChatNavigator.ts           — Minimap rail of user-message dots
+      StatusBar.ts, ReplyHandle.ts, TermPanel.ts
 ```
 
-## Recent Changes
+### Layered responsibilities
 
-See [CHANGELOG.md](./CHANGELOG.md) for the 2026-05-12 context hygiene, context bundle, inline mention, trace archive, provider routing, and skill updates.
+1. **Plugin layer (`plugin.ts`, `settings.ts`, `storage.ts`)** — Owns sessions, folders, the active stream registry, callback server lifecycle, and the settings tab. It is the only place that orchestrates the send flow end-to-end.
+2. **Transport layer (`hermes.ts`)** — Translates `ChatMessage[]` into an OpenAI-compatible request, streams Server-Sent Events back, splits `<thinking>` tags out of content, and emits typed events to handlers (`onToken`, `onThinking`, `onToolCall`, `onContextDebug`, `onComplete`).
+3. **Context layer (`features/contextBundle.ts`, `traceArtifacts.ts`, `contextDebug.ts`)** — Pre- and post-processes the request: builds context bundles before send, archives traces after complete.
+4. **UI layer (`ui/`)** — Pure rendering and input. Talks to the plugin via callbacks and Obsidian's workspace API; receives stream updates via `StreamHandlers` injected by the plugin.
+
+State is split deliberately: **the plugin owns session data**; **`ChatView` owns view state** (which session is open, which panels are showing); **child components own local UI state** (composer draft, popover visibility, modal navigation).
+
+---
+
+## The send flow, step by step
+
+The send flow is the spine of the plugin. Reading this once gives you a working mental model.
+
+1. **User hits send.** `Composer` collects the raw editor text, the active attachment list, and the active skill IDs, and calls `plugin.sendMessage(sessionId, text, attachments, handlers, skillIds)`.
+2. **Context bundle is built.** `buildContextBundle()` (in `features/contextBundle.ts`):
+   - Parses `@[label](path)` inline mentions, resolves them against the vault, and replaces each token with `[ctx_n: name]`.
+   - For each pasted/dropped attachment, writes the original bytes to `agent-vault/runtime/attachments/<sessionId>/<messageId>/originals/`.
+   - For images (except SVG), generates a JPEG visual proxy (max 1280px edge, quality 0.85) under `agent-vault/runtime/derivatives/`.
+   - Assembles a versioned `ContextBundle` JSON file and writes it to `agent-vault/runtime/context-bundles/<sessionId>/<messageId>.json`.
+3. **Two messages are created.**
+   - The **stored** `ChatMessage` keeps the *raw user text*, durable attachment paths, and a compact `contextBundleRef`. No base64 blobs.
+   - The **API-only** message has its `content` rewritten to include `[ctx_n]` references followed by a `<context_bundle version="1">…</context_bundle>` JSON block, plus the visual proxies as `image_url` parts for *this turn only*.
+4. **Agent placeholder is pushed.** An empty assistant `ChatMessage` is appended and registered in `activeStreams` keyed by `sessionId` (so multiple sessions can stream concurrently without colliding).
+5. **Request is built (`hermes.ts → buildMessages`).** The system prompt is composed from:
+   - The base `OBSIDIAN_AGENTS_SYSTEM_PROMPT` (capability declarations: applets, rich layouts, reasoning trace, markdown rules).
+   - A **runtime metadata** block (local time, UTC, timezone, active provider/model/base URL).
+   - A **file handling policy** block (warns the model that file refs ≠ inspected files).
+   - **Archived trace pointers** for prior assistant messages so the model knows where to look if it needs old reasoning.
+   - **Active skills**' system prompts concatenated in order.
+   - A **runtime callback** block (session ID, callback URL, callback token) only if at least one active skill has `injectCallbackContext: true`.
+   Each message is then transformed: only the **current** turn carries inline `image_url` / `input_audio` parts; historical messages are flattened to text with an `<attachment_context_refs>` block listing IDs, kinds, paths, and statuses.
+6. **Budget guard.** If the estimated tokens (`JSON.stringify(messages)` → `estimateTokens`) exceed 80% of the configured context window *with* current-turn binary parts, the request is rebuilt without them and the omission reason is surfaced in the prompt so the model doesn't lie about having seen them.
+7. **Request is sent.** A streaming SSE request goes to the Hermes gateway (`POST <gateway>/chat/completions` with `stream=true`). Auth is `Authorization: Bearer <API_SERVER_KEY>`.
+8. **Events stream in.** `parseSSE` chunks the response. A stateful `ThinkingStripper` routes content inside `<thinking>` / `<think>` / `<reasoning>` tags to `onThinking` so models that inline raw tags (Qwen, DeepSeek, some Ollama builds) still get proper reasoning routing. Reasoning fields like `delta.reasoning` and `delta.reasoning_content` are honored too.
+9. **The UI mutates in place.** `wrappedHandlers` in `plugin.ts` writes incoming tokens onto `agentMsg.content`, attaches `thinking` / `toolCalls` / `contextDebug` to its metadata, and forwards each event to `ChatView`. The bubble re-renders synchronously per event.
+10. **Stream completes.** `onComplete` records `durationMs` and final usage, deletes the session's entry from `activeStreams`, and triggers `saveSessionsData()`.
+11. **Trace archival.** `storage.ts → saveSessions → compactSessionsForStorage` walks every message; any assistant message whose metadata has `thinking`, `toolCalls`, or `contextDebug` gets serialized to `agent-vault/traces/<sessionId>/<messageId>.trace.json` and replaced in memory with a compact `traceRef` pointer.
+
+The end result: the model saw a structured, deduplicated, budget-aware request; the user sees a clean transcript; the disk holds full audit trails.
+
+---
+
+## Context bundles and attachments
+
+This is the heart of the plugin's context hygiene.
+
+### Why bundles exist
+
+A naive chat plugin pastes the body of every mentioned file into the request, base64-encodes every image on every turn, and lets the context window explode. That is wasteful, expensive, and makes the model less accurate (more irrelevant tokens). Obsidian Agents replaces that pattern with **metadata-first context**.
+
+### The `ContextItem` model
+
+Every mention, paste, drop, screenshot, or direct attachment becomes a `ContextItem`:
+
+```ts
+interface ContextItem {
+  id: string;                   // stable per-request, e.g. "ctx_1"
+  source: "mention" | "attachment" | "paste" | "drop" | "screenshot";
+  kind: "text" | "image" | "pdf" | "audio" | "video" | "csv" | "binary" | "folder" | "unknown";
+  name: string;
+  status: "available_not_loaded" | "included_text" | "included_visual_proxy"
+        | "included_audio"      | "referenced_not_inlined" | "failed";
+  original?: { localPath; vaultPath; mime; sizeBytes; width; height };
+  derivatives?: ContextDerivative[];  // e.g. a JPEG visual proxy
+  // …
+}
+```
+
+A bundle is `{ version: 1, sessionId, messageId, createdAt, items: ContextItem[] }` and is rendered into the user message as a single `<context_bundle>` JSON block.
+
+### What the model sees
+
+```
+Compare [ctx_1: README.md] with [ctx_2: screenshot.png].
+
+<context_bundle version="1">
+{ "items": [
+    {"id":"ctx_1","kind":"text","name":"README.md","status":"available_not_loaded","original":{...}},
+    {"id":"ctx_2","kind":"image","name":"screenshot.png","status":"included_visual_proxy","derivatives":[...]}
+  ]
+}
+</context_bundle>
+```
+
+…followed by `image_url` / `input_audio` content parts for items whose status is `included_visual_proxy` / `included_audio`, **but only for the current turn**.
+
+### Attachment lifecycle
+
+- **Paste / drop**: bytes are encoded to a data URL and downscaled if larger than ~900 KB (images get resampled to 1280px / quality 0.8) so the request body stays under the gateway's ~1 MB limit.
+- **Originals** are persisted to `agent-vault/runtime/attachments/<sessionId>/<messageId>/originals/` with collision-safe filenames.
+- **Derivatives** (currently: image visual proxies) go to `agent-vault/runtime/derivatives/<sessionId>/<messageId>/`.
+- **Stored attachment metadata** carries durable paths, MIME, size, and source — *not* the data URL once the durable file exists.
+- **On later turns**, historical attachments become an `<attachment_context_refs>` block listing IDs, types, paths, and sizes. The model is told explicitly: a reference is not an inspection.
+
+### Mentioned files vs. direct attachments
+
+- **Mentions are metadata-first.** They show up as `[ctx_n: name]` references with `status: "available_not_loaded"`. The model can ask to read them with a tool. They are not auto-inlined.
+- **Pasted/dropped media are content-first.** Images and audio get inline content parts on the current turn, within the budget guard, because the user clearly intends them to be inspected right now.
+
+### Budget guard
+
+Before sending, the plugin estimates the request's token cost. If inline image/audio content would push the request past **80% of the configured context window**, those parts are dropped, the message falls back to references, and the system prompt notes the omission reason so the model behaves honestly.
+
+---
+
+## Trace archival and context hygiene
+
+Models also pay tokens for the **previous turns** in the conversation. Reasoning content and tool outputs are the worst offenders: they can be tens of thousands of characters per turn.
+
+The plugin archives them by reference:
+
+- Whenever sessions are saved (`storage.ts`), `compactSessionsForStorage` walks every assistant message.
+- Any message with `metadata.thinking`, `metadata.toolCalls`, or `metadata.contextDebug` gets serialized to `agent-vault/traces/<sessionId>/<messageId>.trace.json`.
+- In-memory metadata is then stripped of the full payloads and replaced with a compact `traceRef` pointer (path + counts).
+- On future requests, `buildTraceReferenceBlock` builds an **archived activity trace pointers** section of the system prompt listing the most recent ~25 archived traces by path + counts, so the model knows what was done and where to look it up if needed.
+- The reasoning drawer in the UI still renders the compact pointer (so users can find the file), but the original full text is no longer in the active chat context.
+
+**Net effect**: a 100-message session with rich tool use stays compact in memory and on the request, while remaining fully auditable on disk.
+
+---
+
+## Inline mentions
+
+The composer stores mentions as **plain text**:
+
+```
+@[Display Name](vault/path.md)
+```
+
+This is the canonical syntax and it is preserved through copy/paste, undo/redo, and persistence. The magic happens at three layers:
+
+1. **MentionPopover** triggers when you type `@` followed by non-whitespace. It fuzzy-searches vault files and folders and inserts the canonical token on selection.
+2. **LivePreviewEditor** (a CodeMirror 6 wrapper) decorates tokens *outside* the cursor as inline chip widgets, but reveals the raw editable text *inside* the cursor. The chip resolves the path; missing files render in a red error state.
+3. **`features/mentions.ts`** parses tokens on send. It supports three fallback shapes (markdown link with `@` prefix, quoted, and a simple boundary-checked `@filename`), handles escaped brackets/parens/backslashes, and produces `ParsedMentionOccurrence` records with start/end offsets so the text can be safely rewritten to `[ctx_n: name]` references.
+
+The result is a composer that *feels* like rich-text mention chips but is *actually* just well-formatted Markdown.
+
+---
+
+## Skills (slash commands)
+
+Skills are **on-demand prompt modules** that the user selects per turn. They are not plugins, not middleware, and not tools — they are extra system-prompt fragments that get appended only when active.
+
+### Registry
+
+`src/skills/index.ts` exports a `SKILLS` array and a `SkillRegistry` class with `get(id)`, `list()`, and `filter(query)` methods. The Composer's `/`-popover and `MentionPopover` for skills both filter through this registry.
+
+### Skill shape
+
+```ts
+interface Skill {
+  id: string;                       // kebab-case, no leading slash
+  label: string;                    // popover title
+  description: string;              // popover subtitle
+  systemPrompt: string;             // appended to the system message when active
+  icon?: string;                    // Lucide icon name (default: "sparkles")
+  placeholder?: string;             // composer placeholder when active
+  injectCallbackContext?: boolean;  // include session/callback runtime block
+  kind?: "core" | "custom";         // ships with plugin vs user-authored
+}
+```
+
+When the user activates skills (up to 3 chips), their IDs are passed to `plugin.sendMessage(...)`, threaded through `RuntimeContext.skillIds`, and concatenated into the system prompt in `hermes.ts`. The callback runtime block is only attached if **any** active skill needs it.
+
+### Built-in skills
+
+| Slash | Label | What it does |
+|---|---|---|
+| `/automation` | Automation | Schedule deferred work; emits callback URL into the system prompt. |
+| `/blog` | Blog project | Project-context mode for the author's blog repo. |
+| `/dynamic-layout` | Dynamic layout | Tells the agent to position media/applets explicitly. |
+| `/wiki` | Wiki | Extract and link to vault notes with strong cross-referencing. |
+| `/applet` | Applet | Builds high-quality interactive HTML/React applets with design guardrails. |
+| `/tutor` | Socratic Tutor | Strict Socratic teaching, first-principles, no direct homework answers. |
+| `/web` | Web search | Forces grounded web search with citations. |
+| `/manage-skills` | Manage skills | Edits the user's custom skills directly via filesystem. |
+| `/self-improve` | Self-improve | Lets the agent edit *this plugin's* source; explains the build loop and verification steps. |
+| `/strategist` | Strategist | Strategic decision-making and planning. |
+| `/sync-obsidian-agents` | Sync plugin | Pull latest plugin updates. |
+| `/transcribe-audio` | Transcribe audio | Convert audio files to text. |
+| `/pdf-to-markdown` | PDF to Markdown | Extract structured Markdown from PDFs. |
+
+### Self-improvement
+
+`/self-improve` is the most reflexive skill: it documents the plugin's layout, build pipeline, type-check & verify steps, and forbids inventing new `Skill` fields. The agent reads this prompt and can then edit the plugin's own source — making the project, to a real degree, an agent that maintains itself.
+
+---
 
 ## Background-job callback server
 
-The plugin runs a small local HTTP server so scheduled / background jobs (cron, deferred tasks) run by your Hermes gateway can deliver their results back into the right place — the chat that scheduled the job, a new chat, a vault note, or a toast notification.
+Some skills (notably `/automation`) need to **schedule** work that completes later — a job that fetches data on a cron, a long-running deep-research task delegated to the gateway, or a follow-up reminder. When that work completes, the result must come *back* into Obsidian.
 
-- Default bind: `127.0.0.1` on an ephemeral port, token-authed.
-- Configure host, port, and token under **Settings → Obsidian Agents → Background-job callback server**.
-- The plugin injects the current callback URL, token, and session id into the system prompt on every request — the agent uses that context to tell the gateway where to POST.
+The plugin solves this by running a tiny local HTTP server.
 
-### Choosing a delivery channel
+### Lifecycle
 
-The agent picks a channel based on the user's phrasing. Examples:
+- Starts on plugin load if `callbackEnabled` is true.
+- Binds to `callbackHost` (default `127.0.0.1`) on `callbackPort` (default `0` = OS-assigned ephemeral).
+- Auto-generates a `callbackToken` on first run if blank.
+- Stops cleanly on `onunload` so no socket is leaked across plugin reloads.
 
-| User says… | Channel | Target |
-|---|---|---|
-| "…reply here when it's done." | `chat` | current session |
-| "…reply in a new chat." | `new-chat` | — |
-| "…save the result to `Daily/Summary.md`." | `note` | vault path |
-| "…just ping me." | `notice` | — |
-| *(no destination specified)* | `chat` *(default)* | current session |
+### Auth
 
-### Gateway HTTP contract
+Token-based. Every request must present `Authorization: Bearer <token>` (or a `?token=…` query param). Mismatches return `401`.
 
-Whichever scheduler or cron runner your Hermes gateway uses, it should POST to the plugin's callback endpoint when a job fires:
+### Channels (pluggable delivery drivers)
 
+`ChannelRegistry` maps channel IDs to `DeliveryChannel` implementations:
+
+```ts
+interface DeliveryChannel {
+  id: string;
+  describe: string;
+  deliver(ctx: DeliveryContext, req: DeliveryRequest): Promise<void>;
+}
 ```
+
+Built-in channels:
+
+| Channel | What it does |
+|---|---|
+| `chat` | Appends the result as a new agent message in the session that scheduled it; falls back to a new chat if the session was deleted. |
+| `new-chat` | Creates a fresh session and posts the result there; surfaces a `Notice` so the user notices. |
+| `note` | Appends to a vault markdown file (auto-creates parent folders, sanitizes paths to block traversal). |
+| `notice` | Shows the result as a transient toast (10s). |
+
+Channels are open: drop a file into `src/callback/channels/` implementing `DeliveryChannel` and register it in `src/callback/channels/index.ts`.
+
+### Request shape
+
+Single delivery:
+
+```json
 POST http://127.0.0.1:<port>/callback
-Authorization: Bearer <callback_token>
+Authorization: Bearer <token>
 Content-Type: application/json
 
 {
   "channel": "chat" | "new-chat" | "note" | "notice",
-  "sessionId": "<session id>",
+  "sessionId": "<id>",
   "target": "Daily/Summary.md",
-  "payload": {
-    "content": "...markdown body...",
-    "title": "optional short label",
-    "metadata": { "jobId": "...", "firedAt": "..." }
-  }
+  "payload": { "content": "...", "title": "optional", "metadata": { ... } }
 }
 ```
 
-The plugin responds `200 {ok:true, channel}` on success, `400` for bad input, `401` for bad token, `500` for delivery errors.
+Batch (one job → many destinations):
 
-### Adding your own channel
+```json
+{ "deliveries": [ { "channel": "chat", ... }, { "channel": "note", ... } ] }
+```
 
-Channels are pluggable. Drop a file into `src/callback/channels/` implementing the `DeliveryChannel` interface and register it in `src/callback/channels/index.ts`. The built-in channels (`chat`, `new-chat`, `note`, `notice`) are reference implementations.
+Responses: `200 {ok:true,channel}` on success, `207` on partial-success batches, `400` for bad input, `401` for bad token, `500` for delivery errors.
 
-## Author
+### How the agent learns the URL
 
-Joao Henrique Costa Araujo
+The Hermes system prompt has a **Runtime context** block injected (only when a skill with `injectCallbackContext: true` is active):
 
-## License
+```
+OBSIDIAN_AGENTS_SESSION_ID=<uuid>
+OBSIDIAN_AGENTS_CALLBACK_URL=http://127.0.0.1:<port>/callback
+OBSIDIAN_AGENTS_CALLBACK_TOKEN=<token>
+```
 
-MIT — see [LICENSE](./LICENSE)
+The agent reads those, schedules a job with the gateway, the gateway POSTs to the callback URL when the job fires, and the result lands in the right place — no polling, no agent state, no leaked credentials.
+
+---
+
+## Rich layouts and applets
+
+Two related capabilities for visually rich replies.
+
+### Inline applets
+
+The agent can emit a fenced code block with language `obsidian-agents-applet` (raw HTML/JS) or `obsidian-agents-react` (React 18). The fence info line accepts `position=inline|left|right|above|below`, `width=...`, and `height=...`. The `LayoutEngine` extracts these and mounts each applet as a **sandboxed iframe** with:
+
+- Theme variables (`--background-primary`, `--text-normal`, etc.) injected as CSS custom properties so applets blend with the user's Obsidian theme.
+- React 18 and `createRoot` pre-imported for `obsidian-agents-react`.
+- Auto-mounting: if the block assigns `App = ...`, the renderer mounts it via `createRoot`; if the block calls `createRoot` itself, it isn't double-mounted.
+- ES module imports allowed via full CDN URLs (`https://esm.sh/three`, `https://esm.sh/d3`, etc.).
+
+Applets are not just decoration — the system prompt has explicit product-quality guardrails ("treat applets like small product artifacts, not decorative code snippets") covering states, accessibility, theme compliance, and motion discipline.
+
+### Rich layout blocks
+
+For media-heavy non-interactive replies, the agent uses JSON-driven fence blocks rendered by `rich-layouts.ts`:
+
+| Fence | What it renders |
+|---|---|
+| `obsidian-agents-hero` | One large image + 1-2 stacked thumbnails (Wikipedia-style opener). |
+| `obsidian-agents-gallery` | Responsive image grid. |
+| `obsidian-agents-carousel` | Horizontal scroller with arrows and counter. |
+| `obsidian-agents-map` | Leaflet map with rating-style pins. |
+| `obsidian-agents-card-list` | Vertical list of cards (title, rating, body, thumbnail). |
+| `obsidian-agents-split` | Visual on one side, prose on the other. |
+| `obsidian-agents-terms` | Silent glossary — adds click-to-open detail panels to inline `[[Label]]{#slug}` markers. |
+
+### Term glossary
+
+A reply can sprinkle inline `[[Term]]{#slug}` markers that the renderer turns into clickable pills. Clicking opens `TermPanel`, a slide-in right-side panel with the term's hero image, summary, key facts, free-form markdown sections, and source links — driven by the `obsidian-agents-terms` block elsewhere in the same reply.
+
+---
+
+## Context debugger
+
+A three-tab modal you can open per assistant message:
+
+- **Blocks** — Every entry in the request, labeled by type (`system`, `developer`, `user`, `assistant`, `tool_call`, `tool_schema`, `tool_result`, `attachment`, `mention_context`, `summary`, `unknown`), with token estimates, role, source, and full content. Searchable; small blocks auto-expand.
+- **Raw JSON** — The full request payload, copyable to clipboard.
+- **Stats** — Token usage bar against the configured context window, estimated cost (current message + session total), compaction details, omitted message count, and any warnings.
+
+The debugger understands **two payload shapes**:
+
+- OpenAI chat-completions style (`messages: [...]`)
+- OpenAI Responses API style (`input: [...]`)
+
+It carefully distinguishes **current-request tool schemas** (declarations of capability) from **historical tool calls / tool results** (actual past activity) — because they have very different semantic meaning even though they look similar in raw form.
+
+---
+
+## Storage layout and runtime artifacts
+
+```
+.obsidian/
+├── obsidian-agents-sessions.json          ← sessions + folders + compact messages
+└── plugins/obsidian-agents/
+    ├── main.js, manifest.json, styles.css  ← what Obsidian loads
+    └── agent-vault/                        ← gitignored runtime artifacts
+        ├── runtime/
+        │   ├── attachments/<sessionId>/<messageId>/originals/   ← pasted/dropped originals
+        │   ├── derivatives/<sessionId>/<messageId>/             ← JPEG visual proxies
+        │   └── context-bundles/<sessionId>/<messageId>.json     ← per-message bundle JSON
+        └── traces/<sessionId>/<messageId>.trace.json            ← archived reasoning + tool calls
+```
+
+Both the vault root `.gitignore` and the plugin's `.gitignore` exclude `agent-vault/` so private runtime artifacts never leak. A one-time migration converts pre-rebrand `agentchat-sessions.json` to the current name, and another migration on load rewrites any legacy persisted base64 attachment blobs into durable agent-vault files + compact refs.
+
+Sessions are persisted only when they contain at least one user message — empty "New Chat" entries stay in memory so the sidebar doesn't fill with cruft.
+
+---
+
+## Module map
+
+A quick reference of where to look when you want to change something.
+
+- **Change the system prompt** → `src/hermes.ts` (`OBSIDIAN_AGENTS_SYSTEM_PROMPT` and the `build…Block` helpers).
+- **Add a new skill** → drop a `.ts` file in `src/skills/`, register it in `src/skills/index.ts`.
+- **Add a callback channel** → drop a `.ts` file in `src/callback/channels/`, register it in `src/callback/channels/index.ts`.
+- **Add a new rich-layout fence** → extend `src/ui/components/rich-layouts.ts` and the layout switch in `LayoutEngine.ts`.
+- **Change attachment downscale rules** → `MAX_IMAGE_DATAURL_CHARS`, `RESAMPLE_MAX_EDGE`, `RESAMPLE_QUALITY` in `src/hermes.ts`, plus `createImageDerivative` in `src/features/contextBundle.ts`.
+- **Change the budget guard** → `ATTACHMENT_INLINE_CONTEXT_RATIO` in `src/hermes.ts`.
+- **Change session persistence** → `src/storage.ts` (file path, compaction wiring).
+- **Change which metadata gets archived** → `hasTracePayload` and `compactMessageForStorage` in `src/traceArtifacts.ts`.
+- **Change cost estimates** → `src/lib/costEstimation.ts`.
+- **Tweak composer behavior** → `src/ui/components/Composer.ts` and `LivePreviewEditor.ts`.
+
+---
+
+## Glossary
+
+- **Hermes** — A local LLM gateway with an OpenAI-compatible API. Routes requests to providers (Anthropic, OpenAI, OpenRouter, local models, etc.), handles credentials, and executes tools. Obsidian Agents is a frontend; Hermes is the brain.
+- **Skill** — A slash-command-activated system-prompt module. Not a tool, not a plugin — just extra context appended when the user opts in.
+- **ContextItem** — A normalized record describing one piece of context (a mention, an attachment, a screenshot) sent to the model.
+- **ContextBundle** — A versioned JSON envelope of `ContextItem`s persisted to disk and rendered into the model-facing user message.
+- **Visual proxy** — A downscaled JPEG derivative of an image, used as the model-facing version so the original (which might be a 20 MB PNG) doesn't get sent.
+- **Trace artifact** — A JSON file under `agent-vault/traces/` holding archived reasoning, tool calls, and debug snapshots for one assistant message.
+- **Steering queue** — Buffer of user messages typed during streaming, coalesced into the next turn when the current stream finishes.
+- **Approval mode** — Hermes-level policy for dangerous commands: `manual`, `smart`, or `off`. Lives in `~/.hermes/config.yaml`.
+- **Callback channel** — A pluggable destination (`chat`, `new-chat`, `note`, `notice`) where a scheduled job's result can be delivered.
+- **Agent vault** — The `agent-vault/` directory inside the plugin folder, gitignored, holding all runtime artifacts (originals, derivatives, bundles, traces).
+
+---
+
+## Author and license
+
+Joao Henrique Costa Araujo — [@Zibhelina](https://github.com/Zibhelina).
+MIT — see [LICENSE](./LICENSE).
