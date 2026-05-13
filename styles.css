@@ -2980,13 +2980,11 @@ button.obsidian-agents-composer-skill-chip-remove:hover {
   margin: 0 0 6px 0;
 }
 
-/* Mention chips surfaced above a sent user message. Reuses the composer
-   chip styling; override container padding/margin so they sit flush with
-   the message bubble. Right-alignment comes from the user wrapper. */
-.obsidian-agents-message-mention-chips {
-  padding: 0;
-  margin: 0 0 6px 0;
-  justify-content: flex-end;
+/* Inline mention chips inside submitted user messages. Reuses the composer
+   live-preview chip classes so sent messages preserve the same inline rhythm. */
+.obsidian-agents-message-inline-mention-chip {
+  max-width: min(240px, 100%);
+  font-size: 0.98em;
 }
 
 .obsidian-agents-message-skill-chip {

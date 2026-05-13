@@ -7,6 +7,11 @@ import { ContextDebugModal } from "./ContextDebugModal";
 import { parseMentionOccurrences } from "../../features/mentions";
 import { pickMentionIcon, pickMentionTone } from "./LivePreviewEditor";
 
+interface InlineMessageMention {
+  label: string;
+  path: string;
+}
+
 export class MessageBubble extends Component {
   private wrapper: HTMLElement;
   private bubble: HTMLElement;
@@ -90,29 +95,6 @@ export class MessageBubble extends Component {
           });
         }
       }
-
-      // Mention chips — parse @[name](path) tokens from the stored content
-      // and surface them as pill chips above the bubble, matching the
-      // composer chip styling so the user can verify what they attached.
-      const mentions = this.parseMentions(this.message.content);
-      if (mentions.length > 0) {
-        const chipRow = this.wrapper.createDiv({
-          cls: "obsidian-agents-mention-chips obsidian-agents-message-mention-chips",
-        });
-        for (const m of mentions) {
-          const tone = pickMentionTone(m.path);
-          const chip = chipRow.createDiv({
-            cls: `obsidian-agents-mention-chip ${tone}`,
-          });
-          const iconEl = chip.createSpan({ cls: "obsidian-agents-mention-chip-icon" });
-          setIcon(iconEl, pickMentionIcon(m.path));
-          chip.createSpan({
-            cls: "obsidian-agents-mention-chip-label",
-            text: m.name,
-            attr: { title: m.path },
-          });
-        }
-      }
     }
 
     // Recreate bubble
@@ -128,16 +110,7 @@ export class MessageBubble extends Component {
     this.contentEl = this.bubble.createDiv();
 
     if (isUser) {
-      // Strip @[name](path) mention tokens — show only the user's prose.
-      const displayText = this.stripMentionTokens(this.message.content).trim();
-      LayoutEngine.render(
-        this.contentEl,
-        displayText || this.message.content,
-        [],
-        this.plugin.app,
-        this,
-        ""
-      );
+      this.renderUserContent(this.contentEl, this.message.content);
     } else {
       const blocks: LayoutBlock[] = [];
       if (this.message.attachments) {
@@ -278,32 +251,116 @@ export class MessageBubble extends Component {
     }
   }
 
-  private parseMentions(content: string): { name: string; path: string }[] {
-    const out: { name: string; path: string }[] = [];
-    const seen = new Set<string>();
-    for (const mention of parseMentionOccurrences(content)) {
-      if (content[mention.tokenStart + 1] !== "[") continue;
-      const path = mention.path;
-      if (seen.has(path)) continue;
-      seen.add(path);
-      out.push({ name: mention.label || path, path });
-    }
-    return out;
+  private renderUserContent(container: HTMLElement, content: string): void {
+    const { content: displayContent, mentions } = this.replaceMentionTokens(content);
+    LayoutEngine.render(
+      container,
+      displayContent.trim() || content,
+      [],
+      this.plugin.app,
+      this,
+      "",
+      (textEl) => this.replaceMentionPlaceholders(textEl, mentions)
+    );
   }
 
-  private stripMentionTokens(content: string): string {
-    const mentions = parseMentionOccurrences(content).filter(
+  private replaceMentionTokens(content: string): {
+    content: string;
+    mentions: InlineMessageMention[];
+  } {
+    const occurrences = parseMentionOccurrences(content).filter(
       (mention) => content[mention.tokenStart + 1] === "["
     );
-    if (mentions.length === 0) return content;
-    let out = "";
+    const mentions: InlineMessageMention[] = [];
+    if (occurrences.length === 0) return { content, mentions };
+
+    let displayContent = "";
     let cursor = 0;
-    for (const mention of mentions) {
-      out += content.slice(cursor, mention.tokenStart);
+    for (const mention of occurrences) {
+      const index = mentions.length;
+      displayContent += content.slice(cursor, mention.tokenStart);
+      displayContent += this.mentionPlaceholder(index);
       cursor = mention.tokenEnd;
+      mentions.push({
+        label: mention.label || this.basename(mention.path),
+        path: mention.path,
+      });
     }
-    out += content.slice(cursor);
-    return out.replace(/[ \t]{2,}/g, " ");
+    displayContent += content.slice(cursor);
+    return { content: displayContent.replace(/[ \t]{2,}/g, " "), mentions };
+  }
+
+  private mentionPlaceholder(index: number): string {
+    return `@@OBSIDIAN_AGENTS_MENTION_${index}@@`;
+  }
+
+  private replaceMentionPlaceholders(
+    root: HTMLElement,
+    mentions: InlineMessageMention[]
+  ): void {
+    if (mentions.length === 0) return;
+
+    const re = /@@OBSIDIAN_AGENTS_MENTION_(\d+)@@/g;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const textNodes: Text[] = [];
+    let node = walker.nextNode();
+    while (node) {
+      textNodes.push(node as Text);
+      node = walker.nextNode();
+    }
+
+    for (const textNode of textNodes) {
+      const text = textNode.nodeValue ?? "";
+      re.lastIndex = 0;
+      if (!re.test(text)) continue;
+
+      re.lastIndex = 0;
+      const frag = document.createDocumentFragment();
+      let cursor = 0;
+      let match: RegExpExecArray | null;
+      while ((match = re.exec(text)) !== null) {
+        if (match.index > cursor) {
+          frag.appendChild(document.createTextNode(text.slice(cursor, match.index)));
+        }
+        const mention = mentions[Number(match[1])];
+        frag.appendChild(
+          mention
+            ? this.createInlineMentionChip(mention)
+            : document.createTextNode(match[0])
+        );
+        cursor = match.index + match[0].length;
+      }
+      if (cursor < text.length) {
+        frag.appendChild(document.createTextNode(text.slice(cursor)));
+      }
+      textNode.parentNode?.replaceChild(frag, textNode);
+    }
+  }
+
+  private createInlineMentionChip(mention: InlineMessageMention): HTMLElement {
+    const tone = pickMentionTone(mention.path);
+    const found = Boolean(this.plugin.app?.vault.getAbstractFileByPath(mention.path));
+    const chip = document.createElement("span");
+    chip.className =
+      `cm-obsidian-agents-mention-chip obsidian-agents-message-inline-mention-chip ${tone}` +
+      (found ? "" : " cm-obsidian-agents-mention-chip-failed");
+    chip.title = found
+      ? mention.path
+      : `Mention target not found: ${mention.path}`;
+    chip.setAttribute("aria-label", mention.label);
+
+    const iconEl = chip.createSpan({ cls: "cm-obsidian-agents-mention-chip-icon" });
+    setIcon(iconEl, pickMentionIcon(mention.path));
+    chip.createSpan({
+      cls: "cm-obsidian-agents-mention-chip-label",
+      text: mention.label,
+    });
+    return chip;
+  }
+
+  private basename(path: string): string {
+    const normalized = path.replace(/\\/g, "/");
+    return normalized.split("/").filter(Boolean).pop() || path;
   }
 
   private attachmentImageSrc(attachment: Attachment): string | null {

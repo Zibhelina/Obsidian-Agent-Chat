@@ -368,7 +368,8 @@ export class LayoutEngine {
     blocks: LayoutBlock[],
     app?: any,
     component?: Component,
-    sourcePath = ""
+    sourcePath = "",
+    postProcessText?: (textEl: HTMLElement) => void
   ): HTMLElement {
     const wrapper = container.createDiv({ cls: "obsidian-agents-layout-engine" });
     const textEl = wrapper.createDiv({ cls: "obsidian-agents-layout-text markdown-rendered" });
@@ -409,6 +410,11 @@ export class LayoutEngine {
       // run even when the message has no terms block — it's a no-op.
       activateTermLinks(textEl);
       enhanceTables(textEl);
+      try {
+        postProcessText?.(textEl);
+      } catch (err) {
+        console.warn("[obsidian-agents] layout text post-process failed", err);
+      }
     };
     doRender();
 
