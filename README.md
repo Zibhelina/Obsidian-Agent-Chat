@@ -55,7 +55,7 @@ A few principles run through every module.
 - **Reasoning trace drawer** — Per-message collapsible panel with the model's `<thinking>` content interleaved with tool calls in a timeline, resizable to fullscreen.
 - **Steering queue** — Messages you type while a stream is in flight buffer up and coalesce into the next turn instead of getting lost or interrupting.
 - **Vault mentions** — Type `@` to fuzzy-search files and folders. Selections insert as `@[Display](vault/path.md)` plain text that the composer renders as a chip.
-- **Skill chips (`/`-commands)** — On-demand prompt modules: tutor, applet builder, web search, blog mode, automation/scheduler, audio transcription, PDF→Markdown, plugin self-improve, etc. Up to three active per turn, displayed as chips above the composer.
+- **Skill chips (`/`-commands)** — On-demand prompt modules: tutor, applet builder, web search, automation/scheduler, audio transcription, plugin self-improve, etc. Up to three active per turn, displayed as chips above the composer.
 - **Multimodal attachments** — Paste, drop, or mention images, audio, PDFs, and text files. Images are downscaled to a JPEG visual proxy for the model; originals are kept durably on disk.
 - **Inline applets** — The agent can emit `obsidian-agents-applet` (raw HTML/JS) or `obsidian-agents-react` (React 18) fenced blocks that mount as sandboxed, theme-aware iframes inside the message. Used for interactive widgets, charts, 3D scenes, simulators.
 - **Rich layout blocks** — JSON-driven `obsidian-agents-hero`, `obsidian-agents-gallery`, `obsidian-agents-carousel`, `obsidian-agents-map`, `obsidian-agents-card-list`, `obsidian-agents-split`, and `obsidian-agents-terms` blocks render polished media-rich replies.
@@ -553,9 +553,7 @@ When the user activates skills (up to 3 chips), their IDs are passed to `plugin.
 | `/manage-skills` | Manage skills | Edits the user's custom skills directly via filesystem. |
 | `/self-improve` | Self-improve | Lets the agent edit *this plugin's* source; explains the build loop and verification steps. |
 | `/strategist` | Strategist | Strategic decision-making and planning. |
-| `/sync-obsidian-agents` | Sync plugin | Pull latest plugin updates. |
 | `/transcribe-audio` | Transcribe audio | Convert audio files to text. |
-| `/pdf-to-markdown` | PDF to Markdown | Extract structured Markdown from PDFs. |
 
 ### Self-improvement
 

@@ -191,8 +191,6 @@ The model picker writes the active provider/model/base URL into Hermes config. C
 
 ## Skills
 
-Skills are on-demand system prompt modules selected through slash commands. New project-context skills include:
+Skills are on-demand system prompt modules selected through slash commands. Add your own project-context skills through the manage-skills flow, which keeps your paths and preferences on your own machine.
 
-- `blog`
-
-The applet and tutor skills now contain stricter quality/pedagogy rules. Self-improvement skills point at the current `agent-vault` path.
+The applet and tutor skills contain stricter quality/pedagogy rules.
